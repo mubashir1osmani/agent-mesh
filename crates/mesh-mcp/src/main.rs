@@ -27,23 +27,18 @@ Set AGENT_MESH_LOG=debug for verbose logging (always on stderr, never stdout).
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Handled before anything else: an MCP client launches this with no arguments, so these are
-    // only ever reached by a human at a terminal.
-    for arg in std::env::args().skip(1) {
+    // Handled before anything else: an MCP client launches this with no arguments, so anything
+    // here came from a human at a terminal.
+    if let Some(arg) = std::env::args().nth(1) {
         match arg.as_str() {
-            "--version" | "-V" => {
-                println!("agent-mesh {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            "--help" | "-h" => {
-                print!("{USAGE}");
-                return Ok(());
-            }
+            "--version" | "-V" => println!("agent-mesh {}", env!("CARGO_PKG_VERSION")),
+            "--help" | "-h" => print!("{USAGE}"),
             other => {
                 eprintln!("agent-mesh: unrecognized argument `{other}`\n\n{USAGE}");
                 std::process::exit(2);
             }
         }
+        return Ok(());
     }
 
     let config = Arc::new(load_config()?);
