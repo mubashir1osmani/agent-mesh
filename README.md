@@ -28,19 +28,22 @@ opencode← "A peer agent says the key is ORCHID-77. Echo it"→ "ORCHID-77"
 
 ## Install
 
-You need [Rust](https://rustup.rs) (1.85+ for edition 2024) and at least one supported agent CLI.
+macOS, one command (universal binary, Apple Silicon and Intel):
+
+```bash
+brew install mubashir1osmani/agent-mesh/agent-mesh
+```
+
+From source, which is the route on Linux; needs [Rust](https://rustup.rs) 1.85+ for edition 2024:
 
 ```bash
 git clone https://github.com/mubashir1osmani/agent-mesh.git
 cd agent-mesh
-cargo build --release
+cargo build --release   # binary at target/release/agent-mesh
 ```
 
-The binary lands at `target/release/agent-mesh`. Copy it onto your `PATH` if you like:
-
-```bash
-cp target/release/agent-mesh ~/.local/bin/
-```
+You also need at least one supported agent CLI installed. `agent-mesh` on its own has nothing to
+talk to; run `list_agents` to see which ones it can find.
 
 ## Quick start
 
@@ -49,8 +52,10 @@ Point an agent at it. The server speaks MCP over stdio, so any MCP client can at
 **Claude Code**
 
 ```bash
-claude mcp add agent-mesh -- /full/path/to/agent-mesh
+claude mcp add --scope user agent-mesh -- "$(brew --prefix)/bin/agent-mesh"
 ```
+
+`--scope user` makes it available in every project rather than just the current one.
 
 **opencode** — add to `~/.config/opencode/opencode.json`:
 
