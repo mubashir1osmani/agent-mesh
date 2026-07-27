@@ -5,7 +5,6 @@
 //! `session/prompt`, and it must answer the requests agents make of it (permission prompts,
 //! file reads) or a prompt will hang forever waiting on approval.
 
-pub mod conn;
 pub mod responder;
 
 use agent_client_protocol_schema::v1::{
@@ -17,7 +16,7 @@ use agent_client_protocol_schema::v1::{
 
 /// The config option id agents use to expose model selection.
 const MODEL_CONFIG_ID: &str = "model";
-use conn::{Connection, Inbound};
+use mesh_core::jsonrpc::{Connection, Inbound};
 use mesh_core::{
     AgentId, AgentTransport, Attached, Capabilities, Opened, Reply, Speaker, Transcript,
     TransportError, Turn, Usage, VendorSessionId,

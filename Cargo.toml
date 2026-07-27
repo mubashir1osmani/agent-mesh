@@ -26,6 +26,9 @@ futures = "0.3"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
+# Denied in production code. Tests assert by panicking, so each test module opts out with
+# `#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+type_complexity = "allow"

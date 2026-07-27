@@ -6,6 +6,10 @@
 //! on, so it must be verified against the vendor, not a stub.
 //!
 //! Skipped automatically when `opencode` is absent so the suite stays green on a bare machine.
+//!
+//! Each test gets its own workspace directory and holds a process-wide lock, because these drive
+//! real agent processes: two running at once contend over the same agent state and fail in ways
+//! that look like protocol bugs.
 
 use mesh_acp::{AcpLaunch, AcpTransport};
 use mesh_core::{AgentId, AgentTransport, Speaker};
@@ -33,21 +37,34 @@ fn transport() -> AcpTransport {
     })
 }
 
-fn workspace() -> PathBuf {
-    std::env::temp_dir()
+/// A private, canonical workspace per test. Canonical matters on macOS, where `/tmp` is a symlink
+/// to `/private/tmp`: the mesh canonicalizes paths, so a session created under one spelling would
+/// not be found under the other.
+fn workspace(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("agent-mesh-live-{name}"));
+    std::fs::create_dir_all(&dir).expect("create workspace");
+    std::fs::canonicalize(&dir).expect("canonicalize workspace")
+}
+
+/// Serializes these tests within the process. `cargo test` runs integration tests in threads by
+/// default, and concurrent agent processes interfere with each other.
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A session can be created and prompted, and the agent's words come back. Without this the
 /// transport is inert.
 #[tokio::test(flavor = "multi_thread")]
 async fn opens_a_session_and_gets_a_reply() {
+    let _guard = exclusive();
     if !opencode_present() {
         eprintln!("skipping: opencode not installed");
         return;
     }
 
     let acp = transport();
-    let cwd = workspace();
+    let cwd = workspace("open");
 
     let opened = acp.open(&cwd).await.expect("session/new should succeed");
     assert!(
@@ -76,12 +93,13 @@ async fn opens_a_session_and_gets_a_reply() {
 /// `attach` ever stops collecting the replay, this fails.
 #[tokio::test(flavor = "multi_thread")]
 async fn session_survives_across_processes_with_transcript_replay() {
+    let _guard = exclusive();
     if !opencode_present() {
         eprintln!("skipping: opencode not installed");
         return;
     }
 
-    let cwd = workspace();
+    let cwd = workspace("resume");
     let marker = "PINEAPPLE";
 
     // First process: create a session and put a distinctive exchange in it.
@@ -146,12 +164,13 @@ async fn session_survives_across_processes_with_transcript_replay() {
 /// conversation is the point of the mesh.
 #[tokio::test(flavor = "multi_thread")]
 async fn attached_session_can_still_be_prompted() {
+    let _guard = exclusive();
     if !opencode_present() {
         eprintln!("skipping: opencode not installed");
         return;
     }
 
-    let cwd = workspace();
+    let cwd = workspace("context");
     let first = transport();
     let opened = first.open(&cwd).await.expect("session/new");
     let vendor = opened.vendor.clone();
@@ -180,6 +199,7 @@ async fn attached_session_can_still_be_prompted() {
 /// hand back a blank session that looks live.
 #[tokio::test(flavor = "multi_thread")]
 async fn attaching_unknown_session_is_an_error() {
+    let _guard = exclusive();
     if !opencode_present() {
         eprintln!("skipping: opencode not installed");
         return;
@@ -188,7 +208,7 @@ async fn attaching_unknown_session_is_an_error() {
     let acp = transport();
     let bogus = mesh_core::VendorSessionId::new("ses_definitely_not_a_real_session");
 
-    let outcome = acp.attach(&bogus, &workspace()).await;
+    let outcome = acp.attach(&bogus, &workspace("unknown")).await;
 
     assert!(
         outcome.is_err(),
@@ -200,13 +220,14 @@ async fn attaching_unknown_session_is_an_error() {
 /// discoverable rather than invisible.
 #[tokio::test(flavor = "multi_thread")]
 async fn created_session_appears_in_list() {
+    let _guard = exclusive();
     if !opencode_present() {
         eprintln!("skipping: opencode not installed");
         return;
     }
 
     let acp = transport();
-    let cwd = workspace();
+    let cwd = workspace("list");
     let opened = acp.open(&cwd).await.expect("session/new");
 
     let listed = acp.list_sessions(&cwd).await.expect("session/list");

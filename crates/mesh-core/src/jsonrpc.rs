@@ -1,4 +1,5 @@
-use mesh_core::{AgentId, TransportError};
+use crate::error::TransportError;
+use crate::session::AgentId;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -38,10 +39,13 @@ pub struct Connection {
     agent: AgentId,
     stdin: Mutex<ChildStdin>,
     next_id: AtomicI64,
-    pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Result<serde_json::Value, RpcFailure>>>>>,
+    pending: Pending,
     subscribers: Arc<RwLock<Vec<mpsc::UnboundedSender<Inbound>>>>,
     child: Mutex<Child>,
 }
+
+/// In-flight requests awaiting a response, keyed by JSON-RPC id.
+type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<serde_json::Value, RpcFailure>>>>>;
 
 #[derive(Debug, Clone)]
 pub struct RpcFailure {
@@ -127,7 +131,7 @@ impl Connection {
 
     async fn dispatch(
         line: &str,
-        pending: &Mutex<HashMap<i64, oneshot::Sender<Result<serde_json::Value, RpcFailure>>>>,
+        pending: &Pending,
         subscribers: &RwLock<Vec<mpsc::UnboundedSender<Inbound>>>,
     ) {
         let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {

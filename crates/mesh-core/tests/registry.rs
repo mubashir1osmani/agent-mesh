@@ -135,30 +135,32 @@ fn find_by_vendor_matches_agent_and_id() {
 
 // --- loop guard ---
 
-/// A asks B asks A must be refused, or two agents will ping-pong until something dies.
-#[test]
-fn ask_chain_refuses_a_b_a_cycle() {
-    let a = mesh_core::SessionRef::parse("claude:a");
-    let b = mesh_core::SessionRef::parse("codex:b");
-
-    let chain = AskChain::root().push(&a, 8).unwrap().push(&b, 8).unwrap();
-
-    assert_eq!(
-        chain.push(&a, 8),
-        Err(ChainRejection::Cycle { session: a })
-    );
-}
-
-/// Immediate self-ask (a session asking itself) is the degenerate cycle and must also fail.
+/// A session asking itself makes no progress and must be refused.
 #[test]
 fn ask_chain_refuses_self_ask() {
     let a = mesh_core::SessionRef::parse("claude:a");
     let chain = AskChain::root().push(&a, 8).unwrap();
 
-    assert!(matches!(
+    assert_eq!(
         chain.push(&a, 8),
-        Err(ChainRejection::Cycle { .. })
-    ));
+        Err(ChainRejection::SelfAsk { session: a })
+    );
+}
+
+/// Returning to a session already in the relay is the whole point of the mesh: ask codex, then go
+/// back and tell opencode what it said. Refusing every revisit would break that workflow, so A->B->A
+/// must be ALLOWED and bounded by depth instead.
+#[test]
+fn ask_chain_allows_returning_to_an_earlier_session() {
+    let a = mesh_core::SessionRef::parse("opencode:a");
+    let b = mesh_core::SessionRef::parse("codex:b");
+
+    let chain = AskChain::root().push(&a, 8).unwrap().push(&b, 8).unwrap();
+
+    let back = chain
+        .push(&a, 8)
+        .expect("relaying an answer back to an earlier session is legitimate");
+    assert_eq!(back.depth(), 3);
 }
 
 /// Even an acyclic chain must terminate, or N agents could relay forever.
@@ -208,4 +210,30 @@ fn ask_chain_is_immutable_across_branches() {
     // The two branches must not see each other's hops.
     assert!(!left.hops().contains(&mesh_core::SessionRef::parse("c:3")));
     assert!(!right.hops().contains(&mesh_core::SessionRef::parse("b:2")));
+}
+
+// --- cwd resolution ---
+
+/// A relative path must be made absolute: ACP requires absolute paths, and a relative one would
+/// resolve against the mesh process's directory rather than the caller's.
+#[test]
+fn absolute_cwd_resolves_relative_paths() {
+    let resolved = mesh_core::absolute_cwd(std::path::Path::new(".")).expect("cwd exists");
+    assert!(resolved.is_absolute());
+}
+
+/// An absolute path that does not exist must fail here rather than being trusted, or it surfaces
+/// later as an opaque spawn failure from the agent.
+#[test]
+fn absolute_cwd_rejects_missing_directory() {
+    assert!(mesh_core::absolute_cwd(std::path::Path::new("/definitely/not/real/xyz")).is_err());
+}
+
+/// A path to a file is not a working directory.
+#[test]
+fn absolute_cwd_rejects_a_file() {
+    let path = std::env::temp_dir().join("mesh-cwd-probe.txt");
+    std::fs::write(&path, b"x").expect("write");
+    assert!(mesh_core::absolute_cwd(&path).is_err());
+    let _ = std::fs::remove_file(&path);
 }

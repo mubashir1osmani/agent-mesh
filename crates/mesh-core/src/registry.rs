@@ -155,8 +155,15 @@ impl SessionRegistry {
     }
 }
 
-/// Guard against an `ask_agent` chain looping back on itself (A asks B, B asks A, forever).
-/// Every hop carries the chain of sessions already visited; re-entering one is refused.
+/// Bounds an `ask_agent` relay so agents cannot ping-pong forever.
+///
+/// Two distinct hazards, deliberately treated differently:
+///
+/// - **Immediate self-ask** (a session asking itself) is always a mistake and is refused outright.
+/// - **Unbounded relay** is bounded by depth, not by forbidding revisits. Coming back to a session
+///   you already spoke to is normal and useful ("ask codex, then go back and tell opencode what it
+///   said"), so refusing every revisit would break the main cross-agent workflow. Depth is what
+///   guarantees termination.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AskChain {
     hops: Arc<Vec<SessionRef>>,
@@ -164,9 +171,9 @@ pub struct AskChain {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainRejection {
-    /// The target session is already somewhere in this chain.
-    Cycle { session: SessionRef },
-    /// The chain is longer than the configured limit.
+    /// The target session is the one currently asking, which would recurse immediately.
+    SelfAsk { session: SessionRef },
+    /// The relay is longer than the configured limit.
     TooDeep { limit: usize },
 }
 
@@ -189,10 +196,12 @@ impl AskChain {
         &self.hops
     }
 
-    /// Extend the chain with `next`, refusing cycles and over-deep chains.
+    /// Extend the relay with `next`, refusing an immediate self-ask or an over-long relay.
     pub fn push(&self, next: &SessionRef, limit: usize) -> Result<Self, ChainRejection> {
-        if self.hops.contains(next) {
-            return Err(ChainRejection::Cycle {
+        // Only the *most recent* hop matters: a session asking itself recurses with no progress,
+        // while returning to an earlier session is a legitimate relay.
+        if self.hops.last().is_some_and(|last| last == next) {
+            return Err(ChainRejection::SelfAsk {
                 session: next.clone(),
             });
         }
@@ -211,12 +220,18 @@ impl AskChain {
     }
 }
 
-/// Resolve a `cwd` argument to an absolute path, since ACP requires absolute paths and a
-/// relative one would silently resolve against the mesh process's directory rather than the
-/// caller's.
+/// Resolve a `cwd` argument to an existing absolute directory.
+///
+/// Absolute paths are still checked rather than trusted: a nonexistent directory has to fail here
+/// with a clear error, otherwise it surfaces much later as an opaque spawn failure from whichever
+/// agent was asked to start there.
 pub fn absolute_cwd(cwd: &Path) -> Result<PathBuf, std::io::Error> {
-    if cwd.is_absolute() {
-        return Ok(cwd.to_path_buf());
+    let resolved = std::fs::canonicalize(cwd)?;
+    if !resolved.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("{} is not a directory", resolved.display()),
+        ));
     }
-    std::fs::canonicalize(cwd)
+    Ok(resolved)
 }

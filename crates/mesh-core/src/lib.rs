@@ -2,11 +2,13 @@
 //! that tracks which vendor sessions exist and whether they are currently attached.
 
 pub mod error;
+pub mod jsonrpc;
 pub mod registry;
 pub mod session;
 pub mod transport;
 
 pub use error::TransportError;
+pub use jsonrpc::{Connection, Inbound};
 pub use registry::{AskChain, ChainRejection, Route, SessionRegistry, absolute_cwd};
 pub use session::{
     AgentId, Capabilities, CostMicros, Reply, SessionEntry, SessionRef, SessionState, Speaker,

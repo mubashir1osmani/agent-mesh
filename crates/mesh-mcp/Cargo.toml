@@ -13,6 +13,7 @@ mesh-acp = { path = "../mesh-acp" }
 mesh-claude = { path = "../mesh-claude" }
 mesh-codex = { path = "../mesh-codex" }
 rmcp.workspace = true
+schemars = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
