@@ -1,0 +1,21 @@
+[package]
+name = "mesh-acp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mesh-core = { path = "../mesh-core" }
+agent-client-protocol-schema.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }
