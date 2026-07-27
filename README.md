@@ -52,10 +52,11 @@ Point an agent at it. The server speaks MCP over stdio, so any MCP client can at
 **Claude Code**
 
 ```bash
-claude mcp add --scope user agent-mesh -- "$(brew --prefix)/bin/agent-mesh"
+claude mcp add --scope user agent-mesh -- agent-mesh
 ```
 
-`--scope user` makes it available in every project rather than just the current one.
+`--scope user` makes it available in every project rather than just the current one. Restart the
+CLI afterwards; MCP servers are loaded at startup.
 
 **opencode** — add to `~/.config/opencode/opencode.json`:
 
@@ -64,7 +65,7 @@ claude mcp add --scope user agent-mesh -- "$(brew --prefix)/bin/agent-mesh"
   "mcp": {
     "agent-mesh": {
       "type": "local",
-      "command": ["/full/path/to/agent-mesh"],
+      "command": ["agent-mesh"],
       "enabled": true
     }
   }
@@ -75,8 +76,12 @@ claude mcp add --scope user agent-mesh -- "$(brew --prefix)/bin/agent-mesh"
 
 ```toml
 [mcp_servers.agent-mesh]
-command = "/full/path/to/agent-mesh"
+command = "agent-mesh"
 ```
+
+These use the bare command name, resolved from `PATH`. Note that neither file expands shell
+substitutions, so `"$(brew --prefix)/bin/agent-mesh"` would be treated as a literal path and fail
+to start. Use a bare name, or a fully written-out path.
 
 Then just ask, in plain language:
 
