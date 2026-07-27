@@ -87,6 +87,7 @@ Then just ask, in plain language:
 | `ask_agent` | Send a prompt into a session; returns the reply, tokens, and cost |
 | `read_session` | Read a conversation without prompting it |
 | `list_sessions` | List known sessions; `discover_in` also finds ones started outside the mesh |
+| `get_usage` | Tokens and cost spent per agent so far |
 
 ## Configuration
 
@@ -130,6 +131,32 @@ enabled = false   # hidden, unsupported subcommand; opt in at your own risk
 ```
 
 Set `AGENT_MESH_LOG=debug` for verbose logs. Logs go to stderr, because stdout is the MCP transport.
+
+### Telemetry
+
+```toml
+[telemetry]
+# Export traces to an OTLP collector. Omit to disable.
+otlp_endpoint = "http://localhost:4317"
+# Serve Prometheus metrics. Omit to disable.
+prometheus_listen = "127.0.0.1:9464"
+```
+
+Traces and the `get_usage` tool work anywhere. The Prometheus endpoint needs one long-lived
+instance: under stdio each MCP client spawns its own agent-mesh process, and only one can hold a
+port. If the port is taken, startup fails loudly rather than serving nothing quietly.
+
+```
+agent_mesh_asks_total{agent="opencode",outcome="success"} 1
+agent_mesh_tokens_total{agent="opencode",direction="input"} 8719
+agent_mesh_ask_duration_seconds_sum{agent="opencode"} 3.83
+```
+
+`outcome` separates `success`, `timeout`, `refused` (relay guard) and `agent_error`, so a wedged
+agent doesn't hide inside a generic failure count.
+
+A note on cost: `cost_usd` is null when the agent never reported spend, which is not the same as
+free. `cost_is_complete` tells you whether a total covers every turn.
 
 ## Supported agents
 

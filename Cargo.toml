@@ -1,11 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["crates/mesh-core", "crates/mesh-acp", "crates/mesh-claude", "crates/mesh-codex", "crates/mesh-mcp"]
+members = [
+    "crates/mesh-core",
+    "crates/mesh-acp",
+    "crates/mesh-claude",
+    "crates/mesh-codex",
+    "crates/mesh-telemetry",
+    "crates/mesh-mcp",
+]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/mubashir1osmani/agent-mesh"
+description = "An MCP control plane that lets coding agents talk to each other's sessions"
 
 [workspace.dependencies]
 agent-client-protocol-schema = { version = "1.6", features = ["unstable_end_turn_token_usage"] }

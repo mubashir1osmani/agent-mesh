@@ -142,6 +142,25 @@ pub struct SessionOpened {
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct UsageEntry {
+    pub agent: String,
+    pub turns: u64,
+    #[schemars(with = "i64")]
+    pub input_tokens: u64,
+    #[schemars(with = "i64")]
+    pub output_tokens: u64,
+    /// Spend so far. Null means no turn reported a cost, which is not the same as free.
+    pub cost_usd: Option<f64>,
+    /// False when at least one turn reported no cost, so `cost_usd` is a floor rather than a total.
+    pub cost_is_complete: bool,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct UsageReport {
+    pub usage: Vec<UsageEntry>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SessionAttached {
     pub session: String,
     pub agent: String,
@@ -293,6 +312,31 @@ impl MeshServer {
             agent,
             turns: to_turns(&transcript, args.last),
         }))
+    }
+
+    #[tool(
+        name = "get_usage",
+        description = "Report tokens and cost spent per agent so far in this mesh process. Use it \
+                       to see what a relay actually cost. A null cost_usd means the agent does not \
+                       report spend, not that it was free."
+    )]
+    fn get_usage(&self) -> Json<UsageReport> {
+        Json(UsageReport {
+            usage: self
+                .mesh
+                .usage()
+                .all()
+                .into_iter()
+                .map(|(agent, u)| UsageEntry {
+                    agent: agent.to_string(),
+                    turns: u.turns,
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    cost_usd: u.cost_usd(),
+                    cost_is_complete: u.cost_is_complete(),
+                })
+                .collect(),
+        })
     }
 
     #[tool(

@@ -10,10 +10,11 @@ use mesh_core::{
     AgentId, AgentTransport, AskChain, Capabilities, ChainRejection, Reply, SessionEntry,
     SessionRef, SessionRegistry, Transcript, TransportError, VendorSessionId,
 };
+use mesh_telemetry::{AskOutcome, UsageRecorder};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Why a mesh operation failed. Distinct from `TransportError` because the mesh has failure modes
 /// no single transport has: an unknown agent, a refused ask chain.
@@ -39,6 +40,7 @@ pub enum MeshError {
 pub struct Mesh {
     transports: BTreeMap<AgentId, Arc<dyn AgentTransport>>,
     registry: SessionRegistry,
+    usage: Arc<UsageRecorder>,
     max_ask_depth: usize,
     turn_timeout: Duration,
 }
@@ -59,9 +61,15 @@ impl Mesh {
         Self {
             transports,
             registry: SessionRegistry::new(),
+            usage: Arc::new(UsageRecorder::new()),
             max_ask_depth: config.max_ask_depth,
             turn_timeout: Duration::from_secs(config.turn_timeout_seconds),
         }
+    }
+
+    /// Accumulated token and cost totals per agent.
+    pub fn usage(&self) -> &UsageRecorder {
+        &self.usage
     }
 
     pub fn agents(&self) -> impl Iterator<Item = (&AgentId, Capabilities)> {
@@ -153,7 +161,11 @@ impl Mesh {
         prompt: &str,
         chain: &AskChain,
     ) -> Result<(Reply, AskChain), MeshError> {
+        let started = Instant::now();
         let next = chain.push(session, self.max_ask_depth).map_err(|why| {
+            if let Ok(entry) = self.registry.get(session) {
+                mesh_telemetry::record_ask(&entry.agent, AskOutcome::Refused, started.elapsed());
+            }
             MeshError::AskRefused {
                 reason: match why {
                     ChainRejection::SelfAsk { session } => format!(
@@ -186,18 +198,29 @@ impl Mesh {
             }
         };
 
-        let reply = tokio::time::timeout(self.turn_timeout, transport.prompt(&vendor, prompt))
+        let outcome = tokio::time::timeout(self.turn_timeout, transport.prompt(&vendor, prompt))
             .await
             .map_err(|_| {
                 // The process may still be mid-turn; mark it detached so the next ask reattaches
                 // rather than assuming a live connection.
                 let _ = self.registry.mark_detached(session);
+                mesh_telemetry::record_ask(&entry.agent, AskOutcome::Timeout, started.elapsed());
                 TransportError::Timeout {
                     agent: entry.agent.clone(),
                     seconds: self.turn_timeout.as_secs(),
                 }
-            })??;
+            })?;
 
+        let reply = match outcome {
+            Ok(reply) => reply,
+            Err(err) => {
+                mesh_telemetry::record_ask(&entry.agent, AskOutcome::AgentError, started.elapsed());
+                return Err(err.into());
+            }
+        };
+
+        self.usage.record(&entry.agent, &reply);
+        mesh_telemetry::record_ask(&entry.agent, AskOutcome::Success, started.elapsed());
         Ok((reply, next))
     }
 

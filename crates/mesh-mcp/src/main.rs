@@ -11,19 +11,46 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tools::MeshServer;
 
+const USAGE: &str = "\
+agent-mesh -- an MCP control plane that lets coding agents talk to each other's sessions
+
+Usage:
+  agent-mesh                 Serve MCP over stdio (how MCP clients launch it)
+  agent-mesh --version       Print the version and exit
+  agent-mesh --help          Print this message and exit
+
+Configuration is read from $AGENT_MESH_CONFIG, ./agents.toml, or
+~/.config/agent-mesh/agents.toml. With none of those, a built-in agent registry is used.
+
+Set AGENT_MESH_LOG=debug for verbose logging (always on stderr, never stdout).
+";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Logs go to stderr: stdout is the MCP transport, so anything written there corrupts the
-    // protocol stream.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("AGENT_MESH_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Handled before anything else: an MCP client launches this with no arguments, so these are
+    // only ever reached by a human at a terminal.
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("agent-mesh {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                print!("{USAGE}");
+                return Ok(());
+            }
+            other => {
+                eprintln!("agent-mesh: unrecognized argument `{other}`\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
 
     let config = Arc::new(load_config()?);
+
+    // Sets up stderr logging plus any configured exporters. Logs must never touch stdout: that is
+    // the MCP transport, and a stray line there corrupts the protocol stream.
+    let _telemetry = mesh_telemetry::init(&config.telemetry)?;
     tracing::info!(
         agents = config.agent_ids().count(),
         max_ask_depth = config.max_ask_depth,

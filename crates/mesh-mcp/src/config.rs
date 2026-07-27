@@ -22,6 +22,9 @@ pub struct Config {
 
     #[serde(default)]
     pub agents: BTreeMap<String, AgentConfig>,
+
+    #[serde(default)]
+    pub telemetry: mesh_telemetry::TelemetryConfig,
 }
 
 fn default_max_chain() -> usize {
@@ -129,6 +132,7 @@ impl Config {
         Self {
             max_ask_depth: default_max_chain(),
             turn_timeout_seconds: default_timeout(),
+            telemetry: mesh_telemetry::TelemetryConfig::default(),
             agents: BTreeMap::from([
                 (
                     "opencode".to_owned(),
