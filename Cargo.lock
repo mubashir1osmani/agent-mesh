@@ -847,7 +847,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mesh-acp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "agent-client-protocol-schema",
  "async-trait",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-claude"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "mesh-core",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-codex"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "mesh-core",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -900,7 +900,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-mcp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "mesh-acp",
  "mesh-claude",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-telemetry"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "mesh-core",
  "metrics",
