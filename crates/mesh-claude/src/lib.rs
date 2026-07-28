@@ -22,8 +22,8 @@ pub mod events;
 
 use events::{ResultEnvelope, StreamEvent};
 use mesh_core::{
-    AgentId, AgentTransport, Attached, Capabilities, Opened, Reply, Transcript, TransportError,
-    Usage, VendorSessionId,
+    AgentId, AgentTransport, Attached, Capabilities, CostMicros, Opened, Reply, Transcript,
+    TransportError, Usage, VendorSessionId,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -49,6 +49,11 @@ struct Session {
     stdin: Mutex<ChildStdin>,
     events: Mutex<mpsc::UnboundedReceiver<StreamEvent>>,
     child: Mutex<Child>,
+    /// Highest `total_cost_usd` seen from this process, in micros. Claude reports spend
+    /// cumulatively for the life of the process, so a per-turn cost is the difference from the
+    /// previous turn. Scoped to the process because the counter restarts from zero when the
+    /// session is resumed into a new one.
+    billed: Mutex<CostMicros>,
 }
 
 impl Session {
@@ -160,6 +165,7 @@ impl ClaudeTransport {
             stdin: Mutex::new(stdin),
             events: Mutex::new(rx),
             child: Mutex::new(child),
+            billed: Mutex::new(CostMicros(0)),
         }))
     }
 
@@ -236,7 +242,10 @@ impl AgentTransport for ClaudeTransport {
         let mut events = session.events.lock().await;
         while let Some(event) = events.recv().await {
             match event {
-                StreamEvent::Result(envelope) => return finish(envelope, &self.launch.agent),
+                StreamEvent::Result(envelope) => {
+                    let mut billed = session.billed.lock().await;
+                    return finish(envelope, &self.launch.agent, &mut billed);
+                }
                 StreamEvent::Other => continue,
             }
         }
@@ -277,21 +286,47 @@ impl AgentTransport for ClaudeTransport {
     }
 }
 
-fn finish(envelope: ResultEnvelope, agent: &AgentId) -> Result<Reply, TransportError> {
+/// Turn a terminal `result` event into a reply.
+///
+/// `billed` is this process's running cost total and is updated in place: Claude reports
+/// `total_cost_usd` cumulatively, so the cost *of this turn* is the increment over the last one.
+/// Reporting the raw field would bill turn 1 again on turn 2, making an N-turn session cost
+/// O(N^2).
+fn finish(
+    envelope: ResultEnvelope,
+    agent: &AgentId,
+    billed: &mut CostMicros,
+) -> Result<Reply, TransportError> {
     if envelope.is_error {
         return Err(TransportError::AgentRefused {
             agent: agent.clone(),
             message: envelope.result,
         });
     }
+
+    let cost = envelope.total_cost_usd.map(events::usd_to_micros).map(|reported| {
+        // A cumulative total should only ever climb. If it dropped, the counter was reset rather
+        // than incremented, so treat the whole figure as this turn's cost instead of computing a
+        // meaningless negative delta.
+        let delta = if reported.0 >= billed.0 {
+            CostMicros(reported.0 - billed.0)
+        } else {
+            reported
+        };
+        *billed = reported;
+        delta
+    });
+
+    let input_tokens = envelope.usage.total_input();
+    let output_tokens = envelope.usage.output_tokens;
     Ok(Reply {
         text: envelope.result,
         usage: Usage {
-            input_tokens: envelope.usage.input_tokens,
-            output_tokens: envelope.usage.output_tokens,
-            total_tokens: envelope.usage.input_tokens + envelope.usage.output_tokens,
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
         },
-        cost: envelope.total_cost_usd.map(events::usd_to_micros),
+        cost,
     })
 }
 
@@ -350,7 +385,7 @@ mod tests {
             session_id: None,
         };
 
-        let outcome = finish(envelope, &AgentId::new("claude"));
+        let outcome = finish(envelope, &AgentId::new("claude"), &mut CostMicros(0));
 
         assert!(
             matches!(outcome, Err(TransportError::AgentRefused { .. })),
@@ -367,11 +402,13 @@ mod tests {
             usage: events::UsageEnvelope {
                 input_tokens: 10,
                 output_tokens: 4,
+                ..Default::default()
             },
             session_id: None,
         };
 
-        let reply = finish(envelope, &AgentId::new("claude")).expect("should succeed");
+        let reply =
+            finish(envelope, &AgentId::new("claude"), &mut CostMicros(0)).expect("should succeed");
 
         assert_eq!(reply.text, "MANGO");
         assert_eq!(reply.usage.total_tokens, 14);
@@ -390,8 +427,77 @@ mod tests {
         };
 
         assert_eq!(
-            finish(envelope, &AgentId::new("claude")).expect("ok").cost,
+            finish(envelope, &AgentId::new("claude"), &mut CostMicros(0))
+                .expect("ok")
+                .cost,
             None
         );
+    }
+
+    fn envelope(cost: f64, usage: events::UsageEnvelope) -> ResultEnvelope {
+        ResultEnvelope {
+            result: "ok".to_owned(),
+            is_error: false,
+            total_cost_usd: Some(cost),
+            usage,
+            session_id: None,
+        }
+    }
+
+    /// Recorded from a live session: `total_cost_usd` is cumulative for the process, so summing
+    /// the raw field bills every earlier turn again and an N-turn session costs O(N^2). Observed
+    /// live: three trivial replies reported 0.362, 0.416, 0.447 for a true spend of ~0.09.
+    #[test]
+    fn cost_is_the_per_turn_delta_not_the_cumulative_total() {
+        let agent = AgentId::new("claude");
+        let mut billed = CostMicros(0);
+
+        let first = finish(envelope(0.36210625, Default::default()), &agent, &mut billed)
+            .expect("first turn");
+        let second = finish(envelope(0.40636275, Default::default()), &agent, &mut billed)
+            .expect("second turn");
+
+        assert_eq!(first.cost, Some(CostMicros(362_106)));
+        assert_eq!(
+            second.cost,
+            Some(CostMicros(44_257)),
+            "second turn must bill only its own increment"
+        );
+    }
+
+    /// Resuming a session spawns a new process whose cost counter restarts, so the reported total
+    /// can drop. Observed live: 0.406 followed by 0.029 after `--resume`. A naive subtraction
+    /// would underflow.
+    #[test]
+    fn a_reset_cost_counter_is_billed_whole_not_negative() {
+        let agent = AgentId::new("claude");
+        let mut billed = CostMicros(406_363);
+
+        let reply =
+            finish(envelope(0.02908775, Default::default()), &agent, &mut billed).expect("resumed");
+
+        assert_eq!(
+            reply.cost,
+            Some(CostMicros(29_088)),
+            "a dropped total means a fresh counter, so bill the figure as-is"
+        );
+    }
+
+    /// Cached reads are billed, just more cheaply. Reading only `input_tokens` reports 4 for a
+    /// turn that actually read ~58k tokens, making a long session look nearly free.
+    #[test]
+    fn input_tokens_include_cache_creation_and_reads() {
+        let usage = events::UsageEnvelope {
+            input_tokens: 4,
+            cache_creation_input_tokens: 11,
+            cache_read_input_tokens: 57_848,
+            output_tokens: 3,
+        };
+
+        let reply = finish(envelope(0.0, usage), &AgentId::new("claude"), &mut CostMicros(0))
+            .expect("ok");
+
+        assert_eq!(reply.usage.input_tokens, 57_863);
+        assert_eq!(reply.usage.total_tokens, 57_866);
     }
 }

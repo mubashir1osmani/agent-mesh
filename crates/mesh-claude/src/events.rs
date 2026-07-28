@@ -30,12 +30,29 @@ pub struct ResultEnvelope {
     pub session_id: Option<String>,
 }
 
+/// Claude splits the input count across three fields. `input_tokens` alone is only the
+/// uncached portion, which on a resumed session collapses to single digits while tens of
+/// thousands of cached tokens go unreported. Cached reads are billed, just more cheaply, so all
+/// three belong in the total.
 #[derive(Debug, Default, Deserialize)]
 pub struct UsageEnvelope {
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
+}
+
+impl UsageEnvelope {
+    /// Every token the model read this turn, cached or not.
+    pub fn total_input(&self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
 }
 
 /// Convert dollars to integer micros. Held as an integer because summing floats across many turns
@@ -117,6 +134,35 @@ mod tests {
             }
             StreamEvent::Other => panic!("expected a result event"),
         }
+    }
+
+    /// Recorded verbatim from a live resumed session. The uncached `input_tokens` is 4 while the
+    /// turn really read ~58k tokens; the extra fields must deserialize or the count is lost.
+    #[test]
+    fn parses_real_usage_envelope_with_cache_fields() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"C",
+            "total_cost_usd":0.02908775,
+            "usage":{"input_tokens":4,"cache_creation_input_tokens":11,
+                     "cache_read_input_tokens":57848,"output_tokens":3,
+                     "service_tier":"standard","speed":"standard"}}"#;
+
+        match serde_json::from_str::<StreamEvent>(line).expect("parse") {
+            StreamEvent::Result(r) => {
+                assert_eq!(r.usage.cache_read_input_tokens, 57_848);
+                assert_eq!(r.usage.total_input(), 57_863);
+            }
+            StreamEvent::Other => panic!("expected a result event"),
+        }
+    }
+
+    /// An envelope with no cache fields at all must still report its uncached count.
+    #[test]
+    fn total_input_falls_back_to_plain_input_tokens() {
+        let usage = UsageEnvelope {
+            input_tokens: 2643,
+            ..Default::default()
+        };
+        assert_eq!(usage.total_input(), 2643);
     }
 
     /// Progress events must not be mistaken for the terminal result, or a prompt would return
