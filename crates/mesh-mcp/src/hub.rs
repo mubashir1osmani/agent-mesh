@@ -12,7 +12,7 @@
 //! agent calls `check_inbox` or a Claude hook drains it.
 
 use crate::config::Config;
-use crate::mesh::{Mesh, MeshError};
+use crate::mesh::{HeadlessProcess, Mesh, MeshError};
 use crate::tmux;
 use mesh_core::{AgentId, AskChain, SessionRef, VendorSessionId};
 use serde::{Deserialize, Serialize};
@@ -68,7 +68,8 @@ impl Node {
 /// One process the hub is responsible for, as shown by `agent-mesh ps`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProcessInfo {
-    /// Node id for a tmux node, or `<agent>/headless` for a background `ask_agent` process.
+    /// Node id for a tmux node, or `<agent>/<pid>` for a background `ask_agent` process. Pass it
+    /// to `kill`.
     pub id: String,
     pub agent: String,
     /// `tmux` or `headless`.
@@ -149,11 +150,16 @@ pub enum Request {
     OpenSession {
         agent: String,
         cwd: String,
+        /// Node that opened it, so `ps` can say who a background process belongs to.
+        #[serde(default)]
+        from: Option<String>,
     },
     AttachSession {
         agent: String,
         session_id: String,
         cwd: String,
+        #[serde(default)]
+        from: Option<String>,
     },
     Ask {
         session: String,
@@ -364,16 +370,22 @@ struct State {
     recent: BTreeMap<(String, String), VecDeque<Instant>>,
     /// Last time each managed node was given work, for idle reaping.
     last_active: BTreeMap<String, Instant>,
-    /// Last time each agent's headless process handled an ask.
-    headless_active: BTreeMap<String, Instant>,
+    /// Last time each headless mesh session was used. Set when an ask starts as well as when it
+    /// ends, so a long turn never looks idle.
+    session_active: BTreeMap<String, Instant>,
+    /// Asks in flight per session; a session with one running is never reaped.
+    in_flight: BTreeMap<String, usize>,
+    /// Who opened each headless mesh session.
+    session_owner: BTreeMap<String, String>,
 }
 
 struct Hub {
     config: Arc<Config>,
     mesh: Mesh,
     state: Mutex<State>,
-    /// Held across "count, then spawn" so concurrent spawns cannot both pass the cap.
-    spawn_gate: tokio::sync::Mutex<()>,
+    /// Held across "count, then start a process", for tmux spawns here and headless starts in
+    /// the mesh alike, so no mix of concurrent requests can overshoot the cap.
+    spawn_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Hub {
@@ -387,11 +399,12 @@ impl Hub {
                     hub.capacity_refusal().await
                 })
             });
+            let gate = Arc::new(tokio::sync::Mutex::new(()));
             Self {
-                mesh: Mesh::from_config(&config).with_admission(admission),
+                mesh: Mesh::from_config(&config).with_admission(admission, Arc::clone(&gate)),
                 config,
                 state: Mutex::new(State::default()),
-                spawn_gate: tokio::sync::Mutex::new(()),
+                spawn_gate: gate,
             }
         })
     }
@@ -480,17 +493,19 @@ impl Hub {
             } => Ok(self.spawn(agent, cwd, prompt, from).await?),
             Request::Ps => Ok(to_value(&self.ps().await)?),
             Request::Kill { target, all } => Ok(self.kill(target, all).await?),
-            Request::OpenSession { agent, cwd } => {
+            Request::OpenSession { agent, cwd, from } => {
                 let session = self
                     .mesh
                     .open_session(&AgentId::new(agent.as_str()), Path::new(&cwd))
                     .map_err(mesh_err)?;
+                self.set_owner(&session, from);
                 Ok(serde_json::json!({ "session": session.to_string(), "agent": agent }))
             }
             Request::AttachSession {
                 agent,
                 session_id,
                 cwd,
+                from,
             } => {
                 let (session, transcript) = self
                     .mesh
@@ -501,7 +516,8 @@ impl Hub {
                     )
                     .await
                     .map_err(mesh_err)?;
-                self.touch_headless(&agent);
+                self.set_owner(&session, from);
+                self.touch(&session);
                 Ok(serde_json::json!({
                     "session": session.to_string(),
                     "agent": agent,
@@ -516,11 +532,12 @@ impl Hub {
                 let session = SessionRef::parse(session.as_str());
                 let chain =
                     AskChain::from_hops(via.iter().map(|h| SessionRef::parse(h.as_str())));
-                let (reply, next) = self
-                    .mesh
-                    .ask(&session, &prompt, &chain)
-                    .await
-                    .map_err(mesh_err)?;
+                let outcome = {
+                    let _busy = self.busy(&session);
+                    self.mesh.ask(&session, &prompt, &chain).await
+                };
+                self.touch(&session);
+                let (reply, next) = outcome.map_err(mesh_err)?;
                 let agent = self
                     .mesh
                     .sessions(None)
@@ -528,7 +545,6 @@ impl Hub {
                     .find(|e| e.session == session)
                     .map(|e| e.agent.to_string())
                     .unwrap_or_default();
-                self.touch_headless(&agent);
                 Ok(serde_json::json!({
                     "reply": reply,
                     "agent": agent,
@@ -538,6 +554,7 @@ impl Hub {
             Request::ReadSession { session } => {
                 let session = SessionRef::parse(session.as_str());
                 let transcript = self.mesh.read_session(&session).await.map_err(mesh_err)?;
+                self.touch(&session);
                 let agent = self
                     .mesh
                     .sessions(None)
@@ -545,7 +562,6 @@ impl Hub {
                     .find(|e| e.session == session)
                     .map(|e| e.agent.to_string())
                     .unwrap_or_default();
-                self.touch_headless(&agent);
                 Ok(serde_json::json!({ "agent": agent, "transcript": transcript }))
             }
             Request::ListSessions { agent, discover_in } => {
@@ -558,7 +574,6 @@ impl Hub {
                             .discover(agent, Path::new(cwd))
                             .await
                             .map_err(mesh_err)?;
-                        self.touch_headless(agent.as_str());
                         found.into_iter().map(|v| v.to_string()).collect()
                     }
                     _ => Vec::<String>::new(),
@@ -587,12 +602,70 @@ impl Hub {
         }
     }
 
-    fn touch_headless(&self, agent: &str) {
-        if !agent.is_empty() {
+    fn touch(&self, session: &SessionRef) {
+        self.with(|s| {
+            s.session_active.insert(session.to_string(), Instant::now());
+        });
+    }
+
+    fn set_owner(&self, session: &SessionRef, from: Option<String>) {
+        if let Some(from) = from {
             self.with(|s| {
-                s.headless_active.insert(agent.to_owned(), Instant::now());
+                s.session_owner.insert(session.to_string(), from);
             });
         }
+    }
+
+    /// Mark an ask as running on `session` until the guard drops.
+    fn busy(&self, session: &SessionRef) -> InFlight<'_> {
+        let key = session.to_string();
+        self.with(|s| {
+            s.session_active.insert(key.clone(), Instant::now());
+            *s.in_flight.entry(key.clone()).or_default() += 1;
+        });
+        InFlight { hub: self, key }
+    }
+
+    /// When a headless process was last used, and by whom: the most recent of its sessions.
+    fn headless_activity(
+        &self,
+        process: &HeadlessProcess,
+    ) -> (Option<Instant>, bool, Option<String>) {
+        self.with(|s| {
+            let keys: Vec<String> = process.sessions.iter().map(SessionRef::to_string).collect();
+            let last = keys.iter().filter_map(|k| s.session_active.get(k)).max().copied();
+            let busy = keys
+                .iter()
+                .any(|k| s.in_flight.get(k).is_some_and(|n| *n > 0));
+            let mut owners: Vec<String> = keys
+                .iter()
+                .filter_map(|k| s.session_owner.get(k).cloned())
+                .collect();
+            owners.sort();
+            owners.dedup();
+            let owner = (!owners.is_empty()).then(|| owners.join(","));
+            (last, busy, owner)
+        })
+    }
+
+    /// When a tmux node last did anything: given work, sent a message, or printed to its pane.
+    /// Pane output is what keeps a node busy on a long task, or one the user is typing into, from
+    /// looking idle.
+    async fn node_activity(&self, node: &Node, recorded: Option<Instant>) -> Option<Instant> {
+        let pane = node
+            .tmux_session
+            .as_deref()
+            .map(tmux::last_activity_unix);
+        let from_pane = match pane {
+            Some(fut) => fut.await.map(|at| {
+                let ago = unix_now().saturating_sub(at);
+                Instant::now()
+                    .checked_sub(Duration::from_secs(ago))
+                    .unwrap_or_else(Instant::now)
+            }),
+            None => None,
+        };
+        recorded.max(from_pane)
     }
 
     /// Everything the hub is running.
@@ -600,11 +673,10 @@ impl Hub {
         self.prune().await;
         let now = Instant::now();
         let now_unix = unix_now();
-        let (nodes, last_active, headless_active) = self.with(|s| {
+        let (nodes, last_active) = self.with(|s| {
             (
                 s.nodes.values().cloned().collect::<Vec<_>>(),
                 s.last_active.clone(),
-                s.headless_active.clone(),
             )
         });
         let tree = process_tree().await;
@@ -613,35 +685,41 @@ impl Hub {
         let mut unmanaged_nodes = Vec::new();
         for node in nodes {
             match (node.is_managed(), node.pid) {
-                (true, Some(pid)) => processes.push(ProcessInfo {
-                    id: node.id.clone(),
-                    agent: node.agent.clone(),
-                    kind: "tmux".to_owned(),
-                    pid,
-                    spawned_by: node.spawned_by.clone(),
-                    age_seconds: (node.started_at_unix > 0)
-                        .then(|| now_unix.saturating_sub(node.started_at_unix)),
-                    idle_seconds: last_active
-                        .get(&node.id)
-                        .map(|t| now.duration_since(*t).as_secs()),
-                    rss_mib: tree_rss_kib(&tree, pid) / 1024,
-                    tmux_session: node.tmux_session.clone(),
-                }),
+                (true, Some(pid)) => {
+                    let active = self
+                        .node_activity(&node, last_active.get(&node.id).copied())
+                        .await;
+                    processes.push(ProcessInfo {
+                        id: node.id.clone(),
+                        agent: node.agent.clone(),
+                        kind: "tmux".to_owned(),
+                        pid,
+                        spawned_by: node.spawned_by.clone(),
+                        age_seconds: (node.started_at_unix > 0)
+                            .then(|| now_unix.saturating_sub(node.started_at_unix)),
+                        idle_seconds: active.map(|t| now.duration_since(t).as_secs()),
+                        rss_mib: tree_rss_kib(&tree, pid) / 1024,
+                        tmux_session: node.tmux_session.clone(),
+                    });
+                }
                 _ => unmanaged_nodes.push(node),
             }
         }
-        for (agent, pid) in self.mesh.processes().await {
+        for process in self.mesh.processes().await {
+            let (active, busy, owner) = self.headless_activity(&process);
             processes.push(ProcessInfo {
-                id: format!("{agent}/headless"),
-                agent: agent.to_string(),
+                id: headless_id(&process),
+                agent: process.agent.to_string(),
                 kind: "headless".to_owned(),
-                pid,
-                spawned_by: None,
+                pid: process.pid,
+                spawned_by: owner,
                 age_seconds: None,
-                idle_seconds: headless_active
-                    .get(agent.as_str())
-                    .map(|t| now.duration_since(*t).as_secs()),
-                rss_mib: tree_rss_kib(&tree, pid) / 1024,
+                idle_seconds: if busy {
+                    Some(0)
+                } else {
+                    active.map(|t| now.duration_since(t).as_secs())
+                },
+                rss_mib: tree_rss_kib(&tree, process.pid) / 1024,
                 tmux_session: None,
             });
         }
@@ -668,19 +746,9 @@ impl Hub {
             }
         }
 
-        let headless: Vec<String> = self
-            .mesh
-            .processes()
-            .await
-            .into_iter()
-            .map(|(agent, _)| agent.to_string())
-            .collect();
-        let mut seen = Vec::new();
-        for agent in headless {
-            let id = format!("{agent}/headless");
-            if wanted(&id) && !seen.contains(&agent) {
-                self.mesh.shutdown_agent(&AgentId::new(agent.as_str())).await;
-                seen.push(agent);
+        for process in self.mesh.processes().await {
+            let id = headless_id(&process);
+            if wanted(&id) && self.mesh.stop_process(process.pid).await {
                 killed.push(id);
             }
         }
@@ -702,9 +770,16 @@ impl Hub {
     }
 
     async fn stop_node(&self, node: &Node) {
+        // Collect the agent's whole process tree first. kill-session only hangs up the pane, and
+        // an agent's MCP servers or tool subprocesses can outlive that and keep their memory.
+        let descendants = match node.pid {
+            Some(pid) => descendants(&process_tree().await, pid),
+            None => Vec::new(),
+        };
         if let Some(session) = node.tmux_session.as_deref() {
             let _ = tmux::kill_session(session).await;
         }
+        terminate(&descendants).await;
         self.with(|s| {
             s.nodes.remove(&node.id);
             s.inboxes.remove(&node.id);
@@ -719,38 +794,38 @@ impl Hub {
             return;
         }
         let now = Instant::now();
-        let (stale_nodes, stale_agents) = self.with(|s| {
-            let nodes: Vec<Node> = s
-                .nodes
-                .values()
-                .filter(|n| n.is_managed())
-                .filter(|n| {
-                    s.last_active
-                        .get(&n.id)
-                        .is_some_and(|t| now.duration_since(*t) > limit)
-                })
-                .cloned()
-                .collect();
-            let agents: Vec<String> = s
-                .headless_active
-                .iter()
-                .filter(|(_, t)| now.duration_since(**t) > limit)
-                .map(|(a, _)| a.clone())
-                .collect();
-            (nodes, agents)
+        let idle = |at: Option<Instant>| at.is_some_and(|t| now.duration_since(t) > limit);
+
+        let (managed, recorded) = self.with(|s| {
+            (
+                s.nodes
+                    .values()
+                    .filter(|n| n.is_managed())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                s.last_active.clone(),
+            )
         });
-        for node in &stale_nodes {
-            tracing::info!(node = %node.id, "reaping idle node");
-            self.stop_node(node).await;
+        let mut reaped_node = false;
+        for node in &managed {
+            let active = self
+                .node_activity(node, recorded.get(&node.id).copied())
+                .await;
+            if idle(active) {
+                tracing::info!(node = %node.id, "reaping idle node");
+                self.stop_node(node).await;
+                reaped_node = true;
+            }
         }
-        for agent in &stale_agents {
-            tracing::info!(%agent, "reaping idle headless agent");
-            self.mesh.shutdown_agent(&AgentId::new(agent.as_str())).await;
-            self.with(|s| {
-                s.headless_active.remove(agent);
-            });
+
+        for process in self.mesh.processes().await {
+            let (active, busy, _) = self.headless_activity(&process);
+            if !busy && idle(active) {
+                tracing::info!(id = %headless_id(&process), "reaping idle headless process");
+                self.mesh.stop_process(process.pid).await;
+            }
         }
-        if !stale_nodes.is_empty() {
+        if reaped_node {
             self.persist();
         }
     }
@@ -868,11 +943,16 @@ impl Hub {
                 .unwrap_or(0),
         };
 
-        if target.is_managed() {
-            self.with(|s| {
-                s.last_active.insert(to.clone(), Instant::now());
-            });
-        }
+        // Both ends are active: the recipient has work, and a node that is sending is clearly
+        // not idle even if nobody has written to it.
+        self.with(|s| {
+            let now = Instant::now();
+            for id in [&to, &message.from] {
+                if s.nodes.get(id).is_some_and(Node::is_managed) {
+                    s.last_active.insert(id.clone(), now);
+                }
+            }
+        });
 
         if let Some(pane) = target.tmux_pane.as_deref() {
             match tmux::paste(pane, &frame(&message)).await {
@@ -1010,6 +1090,80 @@ fn register(state: &mut State, mut node: Node) -> String {
     state.inboxes.entry(id.clone()).or_default();
     state.nodes.insert(id.clone(), node);
     id
+}
+
+/// Releases an in-flight mark when an ask finishes, however it finishes.
+struct InFlight<'a> {
+    hub: &'a Hub,
+    key: String,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.hub.with(|s| {
+            if let Some(n) = s.in_flight.get_mut(&self.key) {
+                *n = n.saturating_sub(1);
+            }
+        });
+    }
+}
+
+/// `claude/40060`: unique per process, so `kill` can close one background session without its
+/// siblings.
+fn headless_id(process: &HeadlessProcess) -> String {
+    format!("{}/{}", process.agent, process.pid)
+}
+
+/// Every descendant of `root`, deepest last.
+fn descendants(tree: &BTreeMap<u32, (u32, u64)>, root: u32) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(pid) = frontier.pop() {
+        for (child, _) in tree.iter().filter(|(_, (ppid, _))| *ppid == pid) {
+            if !out.contains(child) {
+                out.push(*child);
+                frontier.push(*child);
+            }
+        }
+    }
+    out
+}
+
+/// SIGTERM whatever in `pids` is still alive, then SIGKILL stragglers. Via `kill(1)` because
+/// signalling directly would need `unsafe`.
+async fn terminate(pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    let signal = |sig: &'static str, pids: Vec<String>| async move {
+        let _ = tokio::process::Command::new("kill")
+            .arg(sig)
+            .args(pids)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    };
+    let mut alive = Vec::new();
+    for pid in pids {
+        if pid_alive(*pid).await {
+            alive.push(pid.to_string());
+        }
+    }
+    if alive.is_empty() {
+        return;
+    }
+    signal("-TERM", alive).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut stubborn = Vec::new();
+    for pid in pids {
+        if pid_alive(*pid).await {
+            stubborn.push(pid.to_string());
+        }
+    }
+    if !stubborn.is_empty() {
+        signal("-KILL", stubborn).await;
+    }
 }
 
 fn mesh_err(err: MeshError) -> Failure {

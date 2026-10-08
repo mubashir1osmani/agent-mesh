@@ -197,6 +197,23 @@ pub async fn list_mesh_sessions() -> Result<Vec<Found>, TmuxError> {
         .collect())
 }
 
+/// When the session's window last produced output, as unix seconds. Advances while the agent
+/// works or the user types; stays put while it sits idle.
+pub async fn last_activity_unix(session: &str) -> Option<u64> {
+    run(&[
+        "display-message".to_owned(),
+        "-p".to_owned(),
+        "-t".to_owned(),
+        session.to_owned(),
+        "#{window_activity}".to_owned(),
+    ])
+    .await
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+}
+
 pub async fn kill_session(session: &str) -> Result<(), TmuxError> {
     run(&[
         "kill-session".to_owned(),

@@ -8,7 +8,7 @@ use mesh_codex::CodexTransport;
 use mesh_core::registry::Route;
 use mesh_core::{
     AgentId, AgentTransport, AskChain, Capabilities, ChainRejection, Reply, SessionEntry,
-    SessionRef, SessionRegistry, Transcript, TransportError, VendorSessionId,
+    SessionRef, SessionRegistry, Stopped, Transcript, TransportError, VendorSessionId,
 };
 use mesh_telemetry::{AskOutcome, UsageRecorder};
 use std::collections::BTreeMap;
@@ -81,9 +81,19 @@ pub struct Mesh {
     max_ask_depth: usize,
     turn_timeout: Duration,
     admission: Option<Admission>,
-    /// Serializes "check the cap, then start a process", so parallel asks cannot both pass the
-    /// check and overshoot it.
-    spawn_gate: tokio::sync::Mutex<()>,
+    /// Serializes "check the cap, then start a process", so parallel starts cannot both pass the
+    /// check and overshoot it. Shared with the hub, which takes it for tmux spawns too.
+    spawn_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// One headless agent process, as the hub reports it.
+#[derive(Debug, Clone)]
+pub struct HeadlessProcess {
+    pub agent: AgentId,
+    pub pid: u32,
+    /// Mesh sessions this process serves: exactly one for claude, every session of the agent for
+    /// a shared process.
+    pub sessions: Vec<SessionRef>,
 }
 
 impl Mesh {
@@ -106,24 +116,64 @@ impl Mesh {
             max_ask_depth: config.max_ask_depth,
             turn_timeout: Duration::from_secs(config.turn_timeout_seconds),
             admission: None,
-            spawn_gate: tokio::sync::Mutex::new(()),
+            spawn_gate: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
-    pub fn with_admission(mut self, admission: Admission) -> Self {
+    pub fn with_admission(
+        mut self,
+        admission: Admission,
+        gate: Arc<tokio::sync::Mutex<()>>,
+    ) -> Self {
         self.admission = Some(admission);
+        self.spawn_gate = gate;
         self
     }
 
-    /// Every agent process this mesh's transports keep alive, by agent.
-    pub async fn processes(&self) -> Vec<(AgentId, u32)> {
+    /// Every agent process this mesh's transports keep alive.
+    pub async fn processes(&self) -> Vec<HeadlessProcess> {
         let mut out = Vec::new();
         for (agent, transport) in &self.transports {
-            for pid in transport.pids().await {
-                out.push((agent.clone(), pid));
+            for process in transport.processes().await {
+                let sessions = self
+                    .registry
+                    .list(Some(agent))
+                    .into_iter()
+                    .filter(|e| match &process.session {
+                        Some(vendor) => e.state.vendor() == Some(vendor),
+                        None => e.state.vendor().is_some(),
+                    })
+                    .map(|e| e.session)
+                    .collect();
+                out.push(HeadlessProcess {
+                    agent: agent.clone(),
+                    pid: process.pid,
+                    sessions,
+                });
             }
         }
         out
+    }
+
+    /// Stop one headless process and detach the sessions it served, so they reattach on their
+    /// next ask. Returns false if no transport owns `pid`.
+    pub async fn stop_process(&self, pid: u32) -> bool {
+        for (agent, transport) in &self.transports {
+            let Some(stopped) = transport.stop(pid).await else {
+                continue;
+            };
+            for entry in self.registry.list(Some(agent)) {
+                let affected = match &stopped {
+                    Stopped::Session(vendor) => entry.state.vendor() == Some(vendor),
+                    Stopped::Shared => true,
+                };
+                if affected {
+                    let _ = self.registry.mark_detached(&entry.session);
+                }
+            }
+            return true;
+        }
+        false
     }
 
     /// Stop every headless process and detach every session. Nothing is lost: sessions resume on
@@ -137,30 +187,18 @@ impl Mesh {
         }
     }
 
-    /// Detach the sessions of agents whose shared process is gone, so they reattach on next ask.
-    pub async fn shutdown_agent(&self, agent: &AgentId) {
-        if let Some(transport) = self.transports.get(agent) {
-            transport.shutdown().await;
-        }
-        for entry in self.registry.list(Some(agent)) {
-            let _ = self.registry.mark_detached(&entry.session);
-        }
-    }
-
-    /// Run `step` (which may start a process) only if the cap allows it.
+    /// Run `step` only if the cap allows starting a process. `spawns` says whether this step
+    /// would start one; if not, it runs ungated.
     async fn admitted<T>(
         &self,
-        transport: &Arc<dyn AgentTransport>,
-        cwd: &Path,
+        spawns: bool,
         step: impl Future<Output = Result<T, TransportError>>,
     ) -> Result<T, MeshError> {
-        let Some(admission) = &self.admission else {
+        let Some(admission) = self.admission.as_ref().filter(|_| spawns) else {
             return Ok(step.await?);
         };
         let _gate = self.spawn_gate.lock().await;
-        if transport.would_spawn(cwd).await
-            && let Some(refusal) = admission().await
-        {
+        if let Some(refusal) = admission().await {
             return Err(MeshError::AtCapacity(refusal));
         }
         Ok(step.await?)
@@ -222,7 +260,7 @@ impl Mesh {
         };
 
         let attached = self
-            .admitted(&transport, &cwd, transport.attach(vendor, &cwd))
+            .admitted(transport.would_spawn(&cwd).await, transport.attach(vendor, &cwd))
             .await?;
         self.registry.mark_live(&session, attached.vendor)?;
         Ok((session, attached.replayed))
@@ -240,8 +278,11 @@ impl Mesh {
     ) -> Result<Vec<VendorSessionId>, MeshError> {
         let transport = self.transport(agent)?;
         let cwd = resolve_cwd(cwd)?;
-        self.admitted(&transport, &cwd, transport.list_sessions(&cwd))
-            .await
+        self.admitted(
+            transport.discovery_spawns(&cwd).await,
+            transport.list_sessions(&cwd),
+        )
+        .await
     }
 
     /// Send a prompt into a session and return the agent's reply.
@@ -279,14 +320,14 @@ impl Mesh {
         // vendor session exists yet and whether anything is attached to it.
         let vendor = match self.registry.route(session)? {
             Route::Create { cwd } => {
-                let opened = self.admitted(&transport, &cwd, transport.open(&cwd)).await?;
+                let opened = self.admitted(transport.would_spawn(&cwd).await, transport.open(&cwd)).await?;
                 self.registry.mark_live(session, opened.vendor.clone())?;
                 opened.vendor
             }
             Route::PromptDirect { vendor } => vendor,
             Route::ReattachThenPrompt { vendor, cwd } => {
                 let attached = self
-                    .admitted(&transport, &cwd, transport.attach(&vendor, &cwd))
+                    .admitted(transport.would_spawn(&cwd).await, transport.attach(&vendor, &cwd))
                     .await?;
                 self.registry.mark_live(session, attached.vendor.clone())?;
                 attached.vendor
@@ -330,7 +371,10 @@ impl Mesh {
         };
 
         let attached = self
-            .admitted(&transport, &entry.cwd, transport.attach(vendor, &entry.cwd))
+            .admitted(
+                transport.would_spawn(&entry.cwd).await,
+                transport.attach(vendor, &entry.cwd),
+            )
             .await?;
         self.registry.mark_live(session, attached.vendor)?;
         Ok(attached.replayed)
@@ -541,7 +585,7 @@ mod tests {
             .mark_live(&session, VendorSessionId::new("v1"))
             .expect("mark live");
 
-        mesh.shutdown_agent(&AgentId::new("claude")).await;
+        mesh.shutdown_all().await;
 
         assert_eq!(
             mesh.registry.route(&session).expect("route"),

@@ -137,10 +137,16 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        let mut config: Self = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
             path: path.display().to_string(),
             source,
-        })
+        })?;
+        // A file that only tunes limits (`max_processes = 8`) should not silently disable every
+        // agent. Declaring any `[agents.*]` table takes full control of the registry.
+        if config.agents.is_empty() {
+            config.agents = Self::default_agents().agents;
+        }
+        Ok(config)
     }
 
     /// The built-in registry, used when no config file is present so the server is useful with
@@ -264,6 +270,20 @@ mod tests {
         assert_eq!(cfg.idle_timeout_minutes, 30);
         assert_eq!(cfg.agents["codex"].command(), "codex");
         assert!(cfg.agents["codex"].enabled());
+    }
+
+    #[test]
+    fn a_limits_only_file_keeps_the_builtin_agents() {
+        let dir = std::env::temp_dir().join(format!("mesh-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("agents.toml");
+        std::fs::write(&path, "max_processes = 8\n").expect("write");
+
+        let cfg = Config::load(&path).expect("loads");
+
+        assert_eq!(cfg.max_processes, 8);
+        assert!(cfg.agents.contains_key("codex"), "built-in agents must remain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

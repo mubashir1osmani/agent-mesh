@@ -11,8 +11,8 @@ pub mod proto;
 
 use mesh_core::jsonrpc::{Connection, Inbound};
 use mesh_core::{
-    AgentId, AgentTransport, Attached, Capabilities, Opened, Reply, TransportError, Usage,
-    VendorSessionId,
+    AgentId, AgentTransport, Attached, Capabilities, Opened, Process, Reply, Stopped,
+    TransportError, Usage, VendorSessionId,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -185,12 +185,28 @@ impl AgentTransport for CodexTransport {
         }
     }
 
-    async fn pids(&self) -> Vec<u32> {
+    async fn processes(&self) -> Vec<Process> {
         let conn = self.conn.lock().await.clone();
-        match conn {
-            Some(conn) => conn.pid().await.into_iter().collect(),
-            None => Vec::new(),
+        let Some(conn) = conn else {
+            return Vec::new();
+        };
+        conn.pid()
+            .await
+            .map(|pid| Process { pid, session: None })
+            .into_iter()
+            .collect()
+    }
+
+    async fn stop(&self, pid: u32) -> Option<Stopped> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard.clone()?;
+        if conn.pid().await != Some(pid) {
+            return None;
         }
+        *guard = None;
+        drop(guard);
+        conn.shutdown().await;
+        Some(Stopped::Shared)
     }
 
     /// One app-server serves every thread, so only the first session costs a process.

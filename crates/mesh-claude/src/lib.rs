@@ -22,8 +22,8 @@ pub mod events;
 
 use events::{ResultEnvelope, StreamEvent};
 use mesh_core::{
-    AgentId, AgentTransport, Attached, Capabilities, CostMicros, Opened, Reply, Transcript,
-    TransportError, Usage, VendorSessionId,
+    AgentId, AgentTransport, Attached, Capabilities, CostMicros, Opened, Process, Reply, Stopped,
+    Transcript, TransportError, Usage, VendorSessionId,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -286,20 +286,46 @@ impl AgentTransport for ClaudeTransport {
         }
     }
 
-    async fn pids(&self) -> Vec<u32> {
-        let sessions: Vec<Arc<Session>> = self.sessions.lock().await.values().cloned().collect();
-        let mut pids = Vec::new();
-        for session in sessions {
+    async fn processes(&self) -> Vec<Process> {
+        let sessions: Vec<(VendorSessionId, Arc<Session>)> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .map(|(id, s)| (id.clone(), Arc::clone(s)))
+            .collect();
+        let mut out = Vec::new();
+        for (vendor, session) in sessions {
             if let Some(pid) = session.child.lock().await.id() {
-                pids.push(pid);
+                out.push(Process {
+                    pid,
+                    session: Some(vendor),
+                });
             }
         }
-        pids
+        out
     }
 
     /// Every claude session is its own process.
     async fn would_spawn(&self, _cwd: &Path) -> bool {
         true
+    }
+
+    /// Claude's sessions are listed from transcript files; no process is involved.
+    async fn discovery_spawns(&self, _cwd: &Path) -> bool {
+        false
+    }
+
+    async fn stop(&self, pid: u32) -> Option<Stopped> {
+        let vendor = self
+            .processes()
+            .await
+            .into_iter()
+            .find(|p| p.pid == pid)?
+            .session?;
+        let session = self.sessions.lock().await.remove(&vendor)?;
+        session.shutdown().await;
+        Some(Stopped::Session(vendor))
     }
 
     async fn shutdown(&self) {

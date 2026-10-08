@@ -443,9 +443,11 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<OpenSessionArgs>,
     ) -> Result<Json<SessionOpened>, ErrorData> {
+        let from = client::register(&self.identity).await.map_err(hub_error)?;
         let data = client::call(&Request::OpenSession {
             agent: args.agent,
             cwd: absolute(&args.cwd),
+            from,
         })
         .await
         .map_err(hub_error)?;
@@ -463,10 +465,12 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<AttachSessionArgs>,
     ) -> Result<Json<SessionAttached>, ErrorData> {
+        let from = client::register(&self.identity).await.map_err(hub_error)?;
         let data = client::call(&Request::AttachSession {
             agent: args.agent,
             session_id: args.session_id,
             cwd: absolute(&args.cwd),
+            from,
         })
         .await
         .map_err(hub_error)?;

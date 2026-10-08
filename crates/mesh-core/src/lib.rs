@@ -14,7 +14,7 @@ pub use session::{
     AgentId, Capabilities, CostMicros, Reply, SessionEntry, SessionRef, SessionState, Speaker,
     Transcript, Turn, Usage, VendorSessionId,
 };
-pub use transport::{AgentTransport, Attached, DynTransport, Opened};
+pub use transport::{AgentTransport, Attached, DynTransport, Opened, Process, Stopped};
 
 /// Set on every agent process a transport spawns. An agent-mesh MCP server started under one of
 /// those headless agents is plumbing for a single `ask_agent`, not a session anyone should

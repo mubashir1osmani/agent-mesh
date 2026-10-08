@@ -163,6 +163,7 @@ fn start_hub() -> Result<(), HubError> {
     }
     command
         .arg("hub")
+        .env("PATH", hub_path())
         .env_remove(mesh_core::HEADLESS_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -170,6 +171,38 @@ fn start_hub() -> Result<(), HubError> {
         .process_group(0)
         .spawn()?;
     Ok(())
+}
+
+/// The hub outlives whichever client started it and serves every agent, so it must not inherit
+/// one client's idea of PATH: codex, for one, rewrites PATH for its MCP servers. Keep the
+/// caller's entries and make sure the usual install locations for tmux and the agent CLIs follow.
+fn hub_path() -> std::ffi::OsString {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut wanted: Vec<std::path::PathBuf> = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    .iter()
+    .map(std::path::PathBuf::from)
+    .collect();
+    if let Some(home) = home {
+        for rel in [".local/bin", ".cargo/bin", ".claude/local", ".opencode/bin", ".grok/bin"] {
+            wanted.push(home.join(rel));
+        }
+    }
+    for dir in wanted {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_default()
 }
 
 async fn connect_with_retry() -> Result<UnixStream, HubError> {

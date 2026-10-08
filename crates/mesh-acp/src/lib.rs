@@ -18,8 +18,8 @@ use agent_client_protocol_schema::v1::{
 const MODEL_CONFIG_ID: &str = "model";
 use mesh_core::jsonrpc::{Connection, Inbound};
 use mesh_core::{
-    AgentId, AgentTransport, Attached, Capabilities, Opened, Reply, Speaker, Transcript,
-    TransportError, Turn, Usage, VendorSessionId,
+    AgentId, AgentTransport, Attached, Capabilities, Opened, Process, Reply, Speaker, Stopped,
+    Transcript, TransportError, Turn, Usage, VendorSessionId,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -258,16 +258,31 @@ impl AgentTransport for AcpTransport {
         }
     }
 
-    async fn pids(&self) -> Vec<u32> {
+    async fn processes(&self) -> Vec<Process> {
         let conns: Vec<Arc<Connection>> =
             self.connections.lock().await.iter().map(|(_, c)| Arc::clone(c)).collect();
-        let mut pids = Vec::new();
+        let mut out = Vec::new();
         for conn in conns {
             if let Some(pid) = conn.pid().await {
-                pids.push(pid);
+                out.push(Process { pid, session: None });
             }
         }
-        pids
+        out
+    }
+
+    async fn stop(&self, pid: u32) -> Option<Stopped> {
+        let mut guard = self.connections.lock().await;
+        let mut index = None;
+        for (i, (_, conn)) in guard.iter().enumerate() {
+            if conn.pid().await == Some(pid) {
+                index = Some(i);
+                break;
+            }
+        }
+        let (_, conn) = guard.remove(index?);
+        drop(guard);
+        conn.shutdown().await;
+        Some(Stopped::Shared)
     }
 
     /// One process per working directory.

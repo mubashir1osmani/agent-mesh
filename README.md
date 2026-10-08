@@ -133,21 +133,27 @@ $ agent-mesh ps
 
 ID                       KIND      PID           MEM      AGE     IDLE  SPAWNED BY
 codex-2c058244           tmux      36632        250M      55s      55s  claude-34527dcb
-codex-c7d8266b           tmux      36466        253M      55s      55s  claude-34527dcb
-claude/headless          headless  40060        300M        -       0s  -
+codex-c7d8266b           tmux      36466        253M      55s      12s  claude-34527dcb
+claude/40060             headless  40060        300M        -       0s  claude-34527dcb
 
 total memory: 803M
 
 your own sessions on the mesh (not counted, never killed):
   claude-34527dcb        pid 32186    /Users/you/project
 
-$ agent-mesh kill codex-2c058244     # or: agent-mesh kill --all
+$ agent-mesh kill codex-2c058244     # a tmux node, or a background process like claude/40060
+$ agent-mesh kill --all              # everything the mesh spawned
 ```
+
+Memory is the whole process tree (the agent plus its MCP servers and tool subprocesses), and
+killing a node stops that whole tree, not just the tmux session.
 
 - **Cap.** At most `max_processes` (default 4) agent processes at once. Past that, `spawn_node` and
   `ask_agent` are refused with a list of what's running, so the agent (or you) can close something.
 - **Idle reaping.** Spawned nodes and background processes unused for `idle_timeout_minutes`
-  (default 30) are closed. A background session reaped this way resumes on its next `ask_agent`.
+  (default 30) are closed. A node counts as active while it prints to its pane, sends or receives
+  a message, or you type into it, so long tasks and nodes you're watching aren't cut off. A
+  background session reaped this way resumes on its next `ask_agent`.
 - **Your own sessions are never touched.** They show up in `ps` but don't count against the cap,
   and neither `kill` nor `kill_node` will close them.
 - **Restarts.** Spawned nodes are recorded in `~/.agent-mesh/nodes.json`, and a restarted hub
