@@ -74,9 +74,25 @@ pub fn command_line(agent: &str, program: &str, prompt: Option<&str>) -> Vec<Str
     argv
 }
 
+/// Run `argv` through the user's login shell, so the agent gets the same environment as one
+/// started from a terminal (API keys, nvm, PATH additions from `.zshrc`). The hub itself was
+/// launched by whichever MCP client came first and carries only a bare environment.
+///
+/// `exec "$0" "$@"` hands the arguments over untouched: the shell sources its startup files and
+/// then replaces itself with the agent, never interpreting the prompt.
+pub fn through_login_shell(argv: Vec<String>) -> Vec<String> {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_owned());
+    let mut wrapped = vec![shell, "-lic".to_owned(), "exec \"$0\" \"$@\"".to_owned()];
+    wrapped.extend(argv);
+    wrapped
+}
+
 pub async fn spawn(launch: &Launch<'_>) -> Result<Spawned, TmuxError> {
     let session = format!("{SESSION_PREFIX}{}", launch.node_id);
-    let argv = command_line(launch.agent, launch.program, launch.prompt);
+    let argv = through_login_shell(command_line(launch.agent, launch.program, launch.prompt));
 
     let mut args: Vec<String> = [
         "new-session",
@@ -258,6 +274,15 @@ mod tests {
     fn prompt_is_one_argv_element_never_split() {
         let argv = command_line("claude", "claude", Some("two words; rm -rf /"));
         assert_eq!(argv.last().unwrap(), "two words; rm -rf /");
+    }
+
+    #[test]
+    fn login_shell_wrapper_passes_the_agent_argv_through_untouched() {
+        let inner = command_line("claude", "claude", Some("two words; $HOME"));
+        let wrapped = through_login_shell(inner.clone());
+        assert_eq!(wrapped[1], "-lic");
+        assert_eq!(wrapped[2], "exec \"$0\" \"$@\"");
+        assert_eq!(&wrapped[3..], inner.as_slice());
     }
 
     #[test]

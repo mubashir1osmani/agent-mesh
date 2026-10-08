@@ -277,6 +277,10 @@ pub async fn serve(config: Arc<Config>) -> Result<(), HubError> {
     };
     tracing::info!(socket = %path.display(), "hub listening");
 
+    let login = login_env().await;
+    tracing::info!(vars = login.len(), "loaded login-shell environment for agents");
+    mesh_core::set_spawn_env(login);
+
     let hub = Hub::new(config);
     hub.recover().await;
 
@@ -343,6 +347,38 @@ async fn handle(stream: UnixStream, hub: &Hub) -> Result<(), HubError> {
     out.push(b'\n');
     write.write_all(&out).await?;
     Ok(())
+}
+
+/// Variables that describe the shell that printed them rather than the user's setup.
+const SHELL_LOCAL_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "TERM", "PS1", "PS2", "ZDOTDIR"];
+
+/// The user's login-shell environment, read once at startup by running `$SHELL -lic` and
+/// printing it after a marker (so anything `.zshrc` echoes is skipped). Empty if the shell is
+/// slow or fails; agents then get the hub's own environment, as before.
+async fn login_env() -> Vec<(String, String)> {
+    const MARKER: &str = "\u{0}AGENT_MESH_ENV\u{0}";
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/zsh".to_owned());
+    let run = tokio::process::Command::new(&shell)
+        .args(["-lic", "printf '\\0AGENT_MESH_ENV\\0'; env -0"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(10), run).await else {
+        tracing::warn!(%shell, "could not read the login-shell environment; using the hub's own");
+        return Vec::new();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some((_, vars)) = text.split_once(MARKER) else {
+        return Vec::new();
+    };
+    vars.split('\0')
+        .filter_map(|entry| entry.split_once('='))
+        .filter(|(k, _)| !k.is_empty() && !SHELL_LOCAL_VARS.contains(k))
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
 }
 
 async fn wait_for_signal() {
