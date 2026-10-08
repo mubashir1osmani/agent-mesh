@@ -3,8 +3,11 @@
 //! Tool descriptions are written for the *agent* reading them, not for a human skimming docs: an
 //! agent decides whether to call `ask_agent` purely from this text.
 
+use crate::client::{self, Identity};
 use crate::config::Config;
+use crate::hub::{HubError, Message, Node, Request};
 use crate::mesh::{Mesh, MeshError};
+use crate::tmux;
 use mesh_core::{AgentId, AskChain, SessionRef, Speaker, VendorSessionId};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
@@ -15,6 +18,72 @@ use std::sync::Arc;
 pub struct MeshServer {
     mesh: Arc<Mesh>,
     config: Arc<Config>,
+    identity: Arc<Identity>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendMessageArgs {
+    /// Node id from `list_nodes`, e.g. `codex-3f9a1c2e`.
+    pub to: String,
+    pub text: String,
+    /// When replying to a mesh message, pass the `hops` value its header told you to. Omit for a
+    /// fresh conversation. The mesh refuses messages past `max_ask_depth` hops to stop loops.
+    #[serde(default)]
+    pub hops: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpawnNodeArgs {
+    /// Which agent to start, as reported by `list_agents`.
+    pub agent: String,
+    /// Absolute working directory for the new agent.
+    pub cwd: String,
+    /// First thing to tell the new agent. It is told the message came from you, so it can reply.
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PeekNodeArgs {
+    /// Node id from `list_nodes`. Only nodes running in tmux can be peeked.
+    pub node: String,
+    /// How many lines of scrollback to include. Defaults to 60.
+    #[serde(default)]
+    pub lines: Option<usize>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct NodeList {
+    /// Your own node id, so you can tell yourself apart in the list. Null if this server is not
+    /// a mesh node.
+    pub you: Option<String>,
+    pub nodes: Vec<Node>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SendResult {
+    pub to: String,
+    /// `pushed`: typed straight into the recipient's tmux pane. `queued`: waiting in its inbox
+    /// until it checks.
+    pub delivery: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct InboxResult {
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SpawnResult {
+    pub node: Node,
+    /// Run this in a terminal to watch the agent work.
+    pub watch_with: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct PeekResult {
+    pub node: String,
+    pub screen: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -170,8 +239,139 @@ pub struct SessionAttached {
 
 #[tool_router(server_handler)]
 impl MeshServer {
-    pub fn new(mesh: Arc<Mesh>, config: Arc<Config>) -> Self {
-        Self { mesh, config }
+    pub fn new(mesh: Arc<Mesh>, config: Arc<Config>, identity: Arc<Identity>) -> Self {
+        Self {
+            mesh,
+            config,
+            identity,
+        }
+    }
+
+    #[tool(
+        name = "list_nodes",
+        description = "List the agent sessions running live on this machine right now (claude, \
+                       codex, grok, ... in any terminal or tmux pane), including ones spawned \
+                       with spawn_node. Use a node's `id` with send_message. `you` is your own id."
+    )]
+    async fn list_nodes(&self) -> Result<Json<NodeList>, ErrorData> {
+        let you = client::register(&self.identity).await.map_err(hub_error)?;
+        let data = client::call(&Request::List).await.map_err(hub_error)?;
+        Ok(Json(NodeList {
+            you,
+            nodes: from_value(data)?,
+        }))
+    }
+
+    #[tool(
+        name = "send_message",
+        description = "Send a message to another live agent node and return immediately; do not \
+                       wait for an answer. Nodes in tmux get it typed straight into their session; \
+                       others receive it the next time they check. Replies arrive as a new \
+                       message in your session (or via check_inbox), framed with the sender's id."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(args): Parameters<SendMessageArgs>,
+    ) -> Result<Json<SendResult>, ErrorData> {
+        let from = client::register(&self.identity)
+            .await
+            .map_err(hub_error)?
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    "this agent-mesh is running under a headless relay, not a live session, so \
+                     it has no node id to send from",
+                    None,
+                )
+            })?;
+        let data = client::call(&Request::Send {
+            from,
+            to: args.to.clone(),
+            text: args.text,
+            hops: args.hops,
+        })
+        .await
+        .map_err(hub_error)?;
+        Ok(Json(SendResult {
+            to: args.to,
+            delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
+        }))
+    }
+
+    #[tool(
+        name = "check_inbox",
+        description = "Collect messages other agents sent you that have not been delivered into \
+                       your session yet. Each message is returned once. Call this when told a \
+                       peer may have replied, or periodically while waiting on one."
+    )]
+    async fn check_inbox(&self) -> Result<Json<InboxResult>, ErrorData> {
+        let node = client::register(&self.identity).await.map_err(hub_error)?;
+        let data = client::call(&Request::Inbox { node, pid: None })
+            .await
+            .map_err(hub_error)?;
+        Ok(Json(InboxResult {
+            messages: from_value(data)?,
+        }))
+    }
+
+    #[tool(
+        name = "spawn_node",
+        description = "Start a new interactive agent (claude, codex, opencode, gemini, grok) in its \
+                       own tmux session, optionally with a first prompt. It joins the mesh as a \
+                       node you can send_message; its replies come back to you. The user can \
+                       watch it live with the returned `watch_with` command."
+    )]
+    async fn spawn_node(
+        &self,
+        Parameters(args): Parameters<SpawnNodeArgs>,
+    ) -> Result<Json<SpawnResult>, ErrorData> {
+        let from = client::register(&self.identity).await.map_err(hub_error)?;
+        let data = client::call(&Request::Spawn {
+            agent: args.agent,
+            cwd: args.cwd,
+            prompt: args.prompt,
+            from,
+        })
+        .await
+        .map_err(hub_error)?;
+        let node: Node = from_value(data)?;
+        let watch_with = format!(
+            "tmux attach -t {}",
+            node.tmux_session.as_deref().unwrap_or_default()
+        );
+        Ok(Json(SpawnResult { node, watch_with }))
+    }
+
+    #[tool(
+        name = "peek_node",
+        description = "Show what is currently on a tmux node's screen without sending it \
+                       anything. Use it to check whether a spawned agent is still working or has \
+                       finished."
+    )]
+    async fn peek_node(
+        &self,
+        Parameters(args): Parameters<PeekNodeArgs>,
+    ) -> Result<Json<PeekResult>, ErrorData> {
+        let data = client::call_as(&self.identity, &Request::List)
+            .await
+            .map_err(hub_error)?;
+        let nodes: Vec<Node> = from_value(data)?;
+        let pane = nodes
+            .iter()
+            .find(|n| n.id == args.node)
+            .and_then(|n| n.tmux_pane.clone())
+            .ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!("`{}` is not a live tmux node; see list_nodes", args.node),
+                    None,
+                )
+            })?;
+        let screen = tmux::capture(&pane, args.lines.unwrap_or(60))
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(Json(PeekResult {
+            node: args.node,
+            screen,
+        }))
     }
 
     #[tool(
@@ -392,6 +592,19 @@ impl MeshServer {
     }
 }
 
+fn hub_error(err: HubError) -> ErrorData {
+    match err {
+        // The hub refused on the merits (unknown node, loop guard, rate limit): the caller can fix
+        // it by asking differently.
+        HubError::Refused(message) => ErrorData::invalid_params(message, None),
+        other => ErrorData::internal_error(other.to_string(), None),
+    }
+}
+
+fn from_value<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, ErrorData> {
+    serde_json::from_value(value).map_err(|e| ErrorData::internal_error(e.to_string(), None))
+}
+
 fn state_name(state: &mesh_core::SessionState) -> String {
     match state {
         mesh_core::SessionState::NotStarted => "not_started",
@@ -424,9 +637,9 @@ fn to_mcp_error(err: MeshError) -> ErrorData {
     let message = err.to_string();
     match err {
         // Caller passed something wrong; these are recoverable by asking differently.
-        MeshError::UnknownAgent { .. } | MeshError::BadCwd { .. } | MeshError::AskRefused { .. } => {
-            ErrorData::invalid_params(message, None)
-        }
+        MeshError::UnknownAgent { .. }
+        | MeshError::BadCwd { .. }
+        | MeshError::AskRefused { .. } => ErrorData::invalid_params(message, None),
         MeshError::Transport(inner) => match inner {
             mesh_core::TransportError::UnknownSession { .. } => {
                 ErrorData::invalid_params(message, None)
@@ -451,9 +664,18 @@ mod tests {
 
     fn transcript() -> Transcript {
         Transcript::from_turns([
-            Turn { speaker: Speaker::User, text: "one".to_owned() },
-            Turn { speaker: Speaker::Agent, text: "two".to_owned() },
-            Turn { speaker: Speaker::User, text: "three".to_owned() },
+            Turn {
+                speaker: Speaker::User,
+                text: "one".to_owned(),
+            },
+            Turn {
+                speaker: Speaker::Agent,
+                text: "two".to_owned(),
+            },
+            Turn {
+                speaker: Speaker::User,
+                text: "three".to_owned(),
+            },
         ])
     }
 
@@ -510,12 +732,10 @@ mod tests {
     /// A timeout is not something the caller can fix by changing arguments.
     #[test]
     fn timeout_maps_to_internal_error() {
-        let err = to_mcp_error(MeshError::Transport(
-            mesh_core::TransportError::Timeout {
-                agent: AgentId::new("codex"),
-                seconds: 30,
-            },
-        ));
+        let err = to_mcp_error(MeshError::Transport(mesh_core::TransportError::Timeout {
+            agent: AgentId::new("codex"),
+            seconds: 30,
+        }));
         assert_eq!(err.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
     }
 
@@ -526,7 +746,10 @@ mod tests {
             available: "claude, codex".to_owned(),
         });
         let text = err.message.to_string();
-        assert!(text.contains("ghost") && text.contains("claude"), "got: {text}");
+        assert!(
+            text.contains("ghost") && text.contains("claude"),
+            "got: {text}"
+        );
     }
 }
 
@@ -578,8 +801,16 @@ mod schema_tests {
             "ask_agent",
             "read_session",
             "list_sessions",
+            "list_nodes",
+            "send_message",
+            "check_inbox",
+            "spawn_node",
+            "peek_node",
         ] {
-            assert!(names.contains(&expected.to_owned()), "missing tool {expected}");
+            assert!(
+                names.contains(&expected.to_owned()),
+                "missing tool {expected}"
+            );
         }
     }
 

@@ -64,6 +64,7 @@ impl Connection {
         let mut child = Command::new(program)
             .args(args)
             .current_dir(cwd)
+            .env(crate::HEADLESS_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

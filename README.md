@@ -87,7 +87,7 @@ Then just ask, in plain language:
 
 > Open a session with codex, ask it to summarize the auth module, and tell me what it said
 
-## The six tools
+## Session tools
 
 | Tool | What it does |
 |---|---|
@@ -98,6 +98,59 @@ Then just ask, in plain language:
 | `read_session` | Read a conversation without prompting it |
 | `list_sessions` | List known sessions; `discover_in` also finds ones started outside the mesh |
 | `get_usage` | Tokens and cost spent per agent so far |
+
+## Live nodes
+
+Every agent that loads agent-mesh joins a machine-wide **hub** as a *node*, so live sessions can
+message each other while they run. The first agent-mesh to start launches the hub in the
+background (`~/.agent-mesh/hub.sock`, private to your user); you never start it by hand.
+
+```
+                 ┌───────────────────────┐
+   claude TUI ───┤                       ├─── spawned codex  (tmux: mesh-codex-…)
+   grok TUI   ───┤   agent-mesh hub      ├─── spawned claude (tmux: mesh-claude-…)
+                 └───────────────────────┘
+```
+
+| Tool | What it does |
+|---|---|
+| `list_nodes` | Live agent sessions on this machine, and which one is you |
+| `send_message` | Message a node and return immediately; the reply comes back as a message |
+| `check_inbox` | Collect messages that were queued for you |
+| `spawn_node` | Start an agent in its own tmux session, optionally with a first prompt |
+| `peek_node` | Read what is on a tmux node's screen without disturbing it |
+
+**How a message arrives** depends on where the recipient runs:
+
+- **In tmux** (anything `spawn_node` started, or any agent you launched inside tmux): it is typed
+  straight into the session and the agent acts on it immediately.
+- **Claude Code outside tmux**: install the hooks below. Queued messages ride along with your next
+  prompt, and a Claude that is mid-task keeps going to handle a message that arrived while it
+  worked.
+- **Anything else**: it waits until the agent calls `check_inbox`.
+
+Watch a spawned node with `tmux attach -t mesh-<node-id>` (the id `spawn_node` returned).
+
+Each message carries a hop count; replies past `max_ask_depth` hops are refused, and one node can
+send another at most 6 messages a minute, so two agents answering each other cannot loop forever.
+
+**Claude Code hooks** — add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "agent-mesh", "args": ["hook", "user-prompt-submit"] }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "agent-mesh", "args": ["hook", "stop"] }] }
+    ]
+  }
+}
+```
+
+`args` matters: it runs the hook directly rather than through a shell, which is how the hook finds
+the session it belongs to.
 
 ## Configuration
 
@@ -228,6 +281,10 @@ skip themselves when `opencode` isn't installed.
 - `codex app-server` is marked experimental upstream
 - One agent process per working directory, so many concurrent sessions in one repo share a process
 - Sessions live in memory: restart the server and you'll need `attach_session` to rejoin
+- A live TUI outside tmux cannot be interrupted while idle: its messages wait for the next turn
+- `ask_agent` on a session that is also open in a TUI resumes a separate headless copy; use
+  `send_message` to reach the live one
+- Spawned nodes run with each agent's permission-bypass flag, matching the headless transports
 - Codex reports usage per turn; other agents vary in what they report at all
 
 ## License

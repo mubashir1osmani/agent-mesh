@@ -114,6 +114,7 @@ impl ClaudeTransport {
         let mut child = Command::new(&self.launch.program)
             .args(&args)
             .current_dir(cwd)
+            .env(mesh_core::HEADLESS_ENV, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

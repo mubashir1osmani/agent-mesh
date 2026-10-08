@@ -15,3 +15,8 @@ pub use session::{
     Transcript, Turn, Usage, VendorSessionId,
 };
 pub use transport::{AgentTransport, Attached, DynTransport, Opened};
+
+/// Set on every agent process a transport spawns. An agent-mesh MCP server started under one of
+/// those headless agents is plumbing for a single `ask_agent`, not a session anyone should
+/// address, so it must not register itself with the hub.
+pub const HEADLESS_ENV: &str = "AGENT_MESH_HEADLESS";

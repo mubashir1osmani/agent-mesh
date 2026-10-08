@@ -1,7 +1,11 @@
 //! agent-mesh: an MCP server that lets coding agents talk to each other's sessions.
 
+mod client;
 mod config;
+mod hook;
+mod hub;
 mod mesh;
+mod tmux;
 mod tools;
 
 use config::Config;
@@ -16,6 +20,9 @@ agent-mesh -- an MCP control plane that lets coding agents talk to each other's 
 
 Usage:
   agent-mesh                 Serve MCP over stdio (how MCP clients launch it)
+  agent-mesh hub             Run the shared hub in the foreground (normally auto-started)
+  agent-mesh hook <event>    Claude Code hook: deliver queued mesh messages
+                             (<event> is user-prompt-submit or stop)
   agent-mesh --version       Print the version and exit
   agent-mesh --help          Print this message and exit
 
@@ -29,8 +36,14 @@ Set AGENT_MESH_LOG=debug for verbose logging (always on stderr, never stdout).
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handled before anything else: an MCP client launches this with no arguments, so anything
     // here came from a human at a terminal.
-    if let Some(arg) = std::env::args().nth(1) {
+    let mut args = std::env::args().skip(1);
+    if let Some(arg) = args.next() {
         match arg.as_str() {
+            "hub" => return run_hub().await,
+            "hook" => {
+                hook::run(args.next().as_deref().unwrap_or_default()).await;
+                return Ok(());
+            }
             "--version" | "-V" => println!("agent-mesh {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print!("{USAGE}"),
             other => {
@@ -53,11 +66,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "agent-mesh starting"
     );
 
+    let identity = Arc::new(client::Identity::detect().await);
+    if let Some(node) = &identity.node {
+        // Join the mesh now so this session shows up in list_nodes before it calls any tool. A hub
+        // that cannot start is not fatal: the per-session tools still work without it.
+        match client::call(&hub::Request::Register { node: node.clone() }).await {
+            Ok(_) => tracing::info!(node = %node.id, "registered with hub"),
+            Err(err) => tracing::warn!(%err, "could not reach the hub; node tools will retry"),
+        }
+    }
+
     let mesh = Arc::new(Mesh::from_config(&config));
-    let server = MeshServer::new(mesh, config);
+    let server = MeshServer::new(mesh, config, identity);
 
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
+    Ok(())
+}
+
+async fn run_hub() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Arc::new(load_config()?);
+    let _telemetry = mesh_telemetry::init(&config.telemetry)?;
+    hub::serve(config).await?;
     Ok(())
 }
 
