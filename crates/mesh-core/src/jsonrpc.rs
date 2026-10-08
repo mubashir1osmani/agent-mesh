@@ -304,6 +304,10 @@ impl Connection {
             })
     }
 
+    pub async fn pid(&self) -> Option<u32> {
+        self.child.lock().await.id()
+    }
+
     pub async fn shutdown(&self) {
         let mut child = self.child.lock().await;
         let _ = child.start_kill();

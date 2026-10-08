@@ -5,6 +5,7 @@ mod config;
 mod hook;
 mod hub;
 mod mesh;
+mod ps;
 mod tmux;
 mod tools;
 
@@ -21,6 +22,9 @@ agent-mesh -- an MCP control plane that lets coding agents talk to each other's 
 Usage:
   agent-mesh                 Serve MCP over stdio (how MCP clients launch it)
   agent-mesh hub             Run the shared hub in the foreground (normally auto-started)
+  agent-mesh ps              List every agent process the hub is running, with memory
+  agent-mesh kill <id>       Stop one of them (an id from `ps`)
+  agent-mesh kill --all      Stop every agent process the mesh spawned
   agent-mesh hook <event>    Claude Code hook: deliver queued mesh messages
                              (<event> is user-prompt-submit or stop)
   agent-mesh --version       Print the version and exit
@@ -28,6 +32,7 @@ Usage:
 
 Configuration is read from $AGENT_MESH_CONFIG, ./agents.toml, or
 ~/.config/agent-mesh/agents.toml. With none of those, a built-in agent registry is used.
+The hub reads it once, from your home directory, and it applies to every agent on the mesh.
 
 Set AGENT_MESH_LOG=debug for verbose logging (always on stderr, never stdout).
 ";
@@ -40,6 +45,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(arg) = args.next() {
         match arg.as_str() {
             "hub" => return run_hub().await,
+            "ps" => return ps::ps().await,
+            "kill" => return ps::kill(args.next()).await,
             "hook" => {
                 hook::run(args.next().as_deref().unwrap_or_default()).await;
                 return Ok(());
@@ -68,16 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let identity = Arc::new(client::Identity::detect().await);
     if let Some(node) = &identity.node {
-        // Join the mesh now so this session shows up in list_nodes before it calls any tool. A hub
-        // that cannot start is not fatal: the per-session tools still work without it.
+        // Join the mesh now so this session shows up in list_nodes before it calls any tool. Every
+        // tool goes through the hub, so a failure here is logged and retried on the next call.
         match client::call(&hub::Request::Register { node: node.clone() }).await {
             Ok(_) => tracing::info!(node = %node.id, "registered with hub"),
-            Err(err) => tracing::warn!(%err, "could not reach the hub; node tools will retry"),
+            Err(err) => tracing::warn!(%err, "could not reach the hub; tools will retry"),
         }
     }
 
-    let mesh = Arc::new(Mesh::from_config(&config));
-    let server = MeshServer::new(mesh, config, identity);
+    // Capabilities are static, so they come from a local, process-free Mesh; every session and
+    // process lives in the hub.
+    let agents = Mesh::from_config(&config).agents().map(|(a, c)| (a.clone(), c)).collect();
+    let server = MeshServer::new(agents, config, identity);
 
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;

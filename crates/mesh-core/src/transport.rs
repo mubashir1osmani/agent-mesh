@@ -34,6 +34,18 @@ pub trait AgentTransport: Send + Sync {
     async fn list_sessions(&self, cwd: &Path) -> Result<Vec<VendorSessionId>, TransportError>;
 
     fn capabilities(&self) -> Capabilities;
+
+    /// Process ids this transport currently keeps alive, so the hub can count them against its
+    /// cap and report their memory. A shared process (one codex app-server for many threads) is
+    /// listed once.
+    async fn pids(&self) -> Vec<u32>;
+
+    /// Whether reaching a session rooted at `cwd` would start a new process, as opposed to
+    /// reusing one already running. The hub only enforces its process cap when this is true.
+    async fn would_spawn(&self, cwd: &Path) -> bool;
+
+    /// Stop every process this transport owns. The next prompt starts a fresh one and resumes.
+    async fn shutdown(&self);
 }
 
 /// Convenience for tests and for the registry: a boxed transport.

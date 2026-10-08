@@ -45,7 +45,7 @@ pub async fn run(event: &str) {
 
     let body = messages
         .iter()
-        .map(|m| hub::frame(m, "you"))
+        .map(hub::frame)
         .collect::<Vec<_>>()
         .join("\n\n");
 

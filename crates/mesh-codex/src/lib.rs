@@ -184,6 +184,26 @@ impl AgentTransport for CodexTransport {
             reports_cost: false,
         }
     }
+
+    async fn pids(&self) -> Vec<u32> {
+        let conn = self.conn.lock().await.clone();
+        match conn {
+            Some(conn) => conn.pid().await.into_iter().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// One app-server serves every thread, so only the first session costs a process.
+    async fn would_spawn(&self, _cwd: &Path) -> bool {
+        self.conn.lock().await.is_none()
+    }
+
+    async fn shutdown(&self) {
+        let conn = self.conn.lock().await.take();
+        if let Some(conn) = conn {
+            conn.shutdown().await;
+        }
+    }
 }
 
 /// Assemble one turn's reply from the event stream.

@@ -257,6 +257,31 @@ impl AgentTransport for AcpTransport {
             reports_cost: false,
         }
     }
+
+    async fn pids(&self) -> Vec<u32> {
+        let conns: Vec<Arc<Connection>> =
+            self.connections.lock().await.iter().map(|(_, c)| Arc::clone(c)).collect();
+        let mut pids = Vec::new();
+        for conn in conns {
+            if let Some(pid) = conn.pid().await {
+                pids.push(pid);
+            }
+        }
+        pids
+    }
+
+    /// One process per working directory.
+    async fn would_spawn(&self, cwd: &Path) -> bool {
+        !self.connections.lock().await.iter().any(|(root, _)| root == cwd)
+    }
+
+    async fn shutdown(&self) {
+        let drained: Vec<Arc<Connection>> =
+            self.connections.lock().await.drain(..).map(|(_, c)| c).collect();
+        for conn in drained {
+            conn.shutdown().await;
+        }
+    }
 }
 
 fn supports_load_session(init: &serde_json::Value) -> bool {

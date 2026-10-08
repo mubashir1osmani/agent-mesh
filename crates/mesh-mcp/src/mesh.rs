@@ -12,6 +12,8 @@ use mesh_core::{
 };
 use mesh_telemetry::{AskOutcome, UsageRecorder};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +28,11 @@ pub enum MeshError {
     #[error("refusing to route this ask: {reason}")]
     AskRefused { reason: String },
 
+    /// The hub's process cap is reached. Carries the message the hub built, which lists what is
+    /// running so the caller can decide what to close.
+    #[error("{0}")]
+    AtCapacity(String),
+
     #[error("`{cwd}` is not a usable working directory: {source}")]
     BadCwd {
         cwd: String,
@@ -37,12 +44,46 @@ pub enum MeshError {
     Transport(#[from] TransportError),
 }
 
+/// Decides whether a new agent process may start. Returns the refusal message when it may not.
+/// The hub supplies one that counts every process it owns; without one, nothing is capped.
+pub type Admission = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
+
+impl MeshError {
+    /// True when the caller can fix this by asking differently (bad argument, refused loop, cap
+    /// reached), as opposed to an agent or transport failing. Exhaustive so a new failure mode
+    /// cannot silently fall into the wrong bucket.
+    pub fn is_callers_fault(&self) -> bool {
+        match self {
+            Self::UnknownAgent { .. }
+            | Self::BadCwd { .. }
+            | Self::AskRefused { .. }
+            | Self::AtCapacity(_) => true,
+            Self::Transport(inner) => match inner {
+                TransportError::UnknownSession { .. } => true,
+                TransportError::ResumeUnsupported { .. }
+                | TransportError::Unreachable { .. }
+                | TransportError::Spawn { .. }
+                | TransportError::ConnectionClosed { .. }
+                | TransportError::Protocol { .. }
+                | TransportError::AgentRefused { .. }
+                | TransportError::Timeout { .. }
+                | TransportError::Cancelled { .. }
+                | TransportError::Decode { .. } => false,
+            },
+        }
+    }
+}
+
 pub struct Mesh {
     transports: BTreeMap<AgentId, Arc<dyn AgentTransport>>,
     registry: SessionRegistry,
     usage: Arc<UsageRecorder>,
     max_ask_depth: usize,
     turn_timeout: Duration,
+    admission: Option<Admission>,
+    /// Serializes "check the cap, then start a process", so parallel asks cannot both pass the
+    /// check and overshoot it.
+    spawn_gate: tokio::sync::Mutex<()>,
 }
 
 impl Mesh {
@@ -64,7 +105,65 @@ impl Mesh {
             usage: Arc::new(UsageRecorder::new()),
             max_ask_depth: config.max_ask_depth,
             turn_timeout: Duration::from_secs(config.turn_timeout_seconds),
+            admission: None,
+            spawn_gate: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub fn with_admission(mut self, admission: Admission) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+
+    /// Every agent process this mesh's transports keep alive, by agent.
+    pub async fn processes(&self) -> Vec<(AgentId, u32)> {
+        let mut out = Vec::new();
+        for (agent, transport) in &self.transports {
+            for pid in transport.pids().await {
+                out.push((agent.clone(), pid));
+            }
+        }
+        out
+    }
+
+    /// Stop every headless process and detach every session. Nothing is lost: sessions resume on
+    /// their next ask.
+    pub async fn shutdown_all(&self) {
+        for transport in self.transports.values() {
+            transport.shutdown().await;
+        }
+        for entry in self.registry.list(None) {
+            let _ = self.registry.mark_detached(&entry.session);
+        }
+    }
+
+    /// Detach the sessions of agents whose shared process is gone, so they reattach on next ask.
+    pub async fn shutdown_agent(&self, agent: &AgentId) {
+        if let Some(transport) = self.transports.get(agent) {
+            transport.shutdown().await;
+        }
+        for entry in self.registry.list(Some(agent)) {
+            let _ = self.registry.mark_detached(&entry.session);
+        }
+    }
+
+    /// Run `step` (which may start a process) only if the cap allows it.
+    async fn admitted<T>(
+        &self,
+        transport: &Arc<dyn AgentTransport>,
+        cwd: &Path,
+        step: impl Future<Output = Result<T, TransportError>>,
+    ) -> Result<T, MeshError> {
+        let Some(admission) = &self.admission else {
+            return Ok(step.await?);
+        };
+        let _gate = self.spawn_gate.lock().await;
+        if transport.would_spawn(cwd).await
+            && let Some(refusal) = admission().await
+        {
+            return Err(MeshError::AtCapacity(refusal));
+        }
+        Ok(step.await?)
     }
 
     /// Accumulated token and cost totals per agent.
@@ -78,15 +177,6 @@ impl Mesh {
             .map(|(id, t)| (id, t.capabilities()))
     }
 
-    /// Is this agent's executable actually on PATH? Reported by `list_agents` so a caller learns
-    /// an agent is unusable before trying to prompt it.
-    pub fn is_installed(&self, config: &Config, agent: &AgentId) -> bool {
-        config
-            .agents
-            .get(agent.as_str())
-            .map(|cfg| which(cfg.command()))
-            .unwrap_or(false)
-    }
 
     fn transport(&self, agent: &AgentId) -> Result<Arc<dyn AgentTransport>, MeshError> {
         self.transports
@@ -131,7 +221,9 @@ impl Mesh {
                 .register_existing(agent.clone(), cwd.clone(), vendor.clone()),
         };
 
-        let attached = transport.attach(vendor, &cwd).await?;
+        let attached = self
+            .admitted(&transport, &cwd, transport.attach(vendor, &cwd))
+            .await?;
         self.registry.mark_live(&session, attached.vendor)?;
         Ok((session, attached.replayed))
     }
@@ -148,7 +240,8 @@ impl Mesh {
     ) -> Result<Vec<VendorSessionId>, MeshError> {
         let transport = self.transport(agent)?;
         let cwd = resolve_cwd(cwd)?;
-        Ok(transport.list_sessions(&cwd).await?)
+        self.admitted(&transport, &cwd, transport.list_sessions(&cwd))
+            .await
     }
 
     /// Send a prompt into a session and return the agent's reply.
@@ -186,13 +279,15 @@ impl Mesh {
         // vendor session exists yet and whether anything is attached to it.
         let vendor = match self.registry.route(session)? {
             Route::Create { cwd } => {
-                let opened = transport.open(&cwd).await?;
+                let opened = self.admitted(&transport, &cwd, transport.open(&cwd)).await?;
                 self.registry.mark_live(session, opened.vendor.clone())?;
                 opened.vendor
             }
             Route::PromptDirect { vendor } => vendor,
             Route::ReattachThenPrompt { vendor, cwd } => {
-                let attached = transport.attach(&vendor, &cwd).await?;
+                let attached = self
+                    .admitted(&transport, &cwd, transport.attach(&vendor, &cwd))
+                    .await?;
                 self.registry.mark_live(session, attached.vendor.clone())?;
                 attached.vendor
             }
@@ -234,10 +329,22 @@ impl Mesh {
             return Ok(Transcript::default());
         };
 
-        let attached = transport.attach(vendor, &entry.cwd).await?;
+        let attached = self
+            .admitted(&transport, &entry.cwd, transport.attach(vendor, &entry.cwd))
+            .await?;
         self.registry.mark_live(session, attached.vendor)?;
         Ok(attached.replayed)
     }
+}
+
+/// Is this agent's executable actually on PATH? Reported by `list_agents` so a caller learns an
+/// agent is unusable before trying to prompt it.
+pub fn is_installed(config: &Config, agent: &AgentId) -> bool {
+    config
+        .agents
+        .get(agent.as_str())
+        .map(|cfg| which(cfg.command()))
+        .unwrap_or(false)
 }
 
 fn build_transport(agent: &AgentId, cfg: &AgentConfig) -> Arc<dyn AgentTransport> {
@@ -420,6 +527,29 @@ mod tests {
         let transcript = mesh.read_session(&session).await.expect("should succeed");
 
         assert!(transcript.is_empty());
+    }
+
+    /// After the hub stops an agent's processes (kill or idle reap), its sessions must come back as
+    /// detached, so the next ask resumes them rather than writing to a pipe nobody reads.
+    #[tokio::test]
+    async fn stopping_an_agent_detaches_its_sessions_for_reattach() {
+        let mesh = mesh();
+        let session = mesh
+            .open_session(&AgentId::new("claude"), Path::new("/tmp"))
+            .expect("register");
+        mesh.registry
+            .mark_live(&session, VendorSessionId::new("v1"))
+            .expect("mark live");
+
+        mesh.shutdown_agent(&AgentId::new("claude")).await;
+
+        assert_eq!(
+            mesh.registry.route(&session).expect("route"),
+            Route::ReattachThenPrompt {
+                vendor: VendorSessionId::new("v1"),
+                cwd: PathBuf::from("/tmp").canonicalize().expect("tmp exists"),
+            }
+        );
     }
 
     #[test]

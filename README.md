@@ -101,9 +101,13 @@ Then just ask, in plain language:
 
 ## Live nodes
 
-Every agent that loads agent-mesh joins a machine-wide **hub** as a *node*, so live sessions can
-message each other while they run. The first agent-mesh to start launches the hub in the
-background (`~/.agent-mesh/hub.sock`, private to your user); you never start it by hand.
+Every agent that loads agent-mesh joins your **hub** as a *node*, so live sessions can message each
+other while they run. There is one hub per user (`~/.agent-mesh/hub.sock`, private to you); the
+first agent-mesh to start launches it in the background, so you never start it by hand.
+
+The hub owns **every agent process the mesh runs**: tmux nodes from `spawn_node` and the background
+processes behind `ask_agent`. Each agent's own agent-mesh is just a thin client, which is what lets
+the hub count them, cap them, and close them.
 
 ```
                  ┌───────────────────────┐
@@ -119,6 +123,35 @@ background (`~/.agent-mesh/hub.sock`, private to your user); you never start it 
 | `check_inbox` | Collect messages that were queued for you |
 | `spawn_node` | Start an agent in its own tmux session, optionally with a first prompt |
 | `peek_node` | Read what is on a tmux node's screen without disturbing it |
+| `kill_node` | Close a node the mesh spawned |
+
+### Keeping track of what's running
+
+```
+$ agent-mesh ps
+3 of 4 agent processes (max_processes)
+
+ID                       KIND      PID           MEM      AGE     IDLE  SPAWNED BY
+codex-2c058244           tmux      36632        250M      55s      55s  claude-34527dcb
+codex-c7d8266b           tmux      36466        253M      55s      55s  claude-34527dcb
+claude/headless          headless  40060        300M        -       0s  -
+
+total memory: 803M
+
+your own sessions on the mesh (not counted, never killed):
+  claude-34527dcb        pid 32186    /Users/you/project
+
+$ agent-mesh kill codex-2c058244     # or: agent-mesh kill --all
+```
+
+- **Cap.** At most `max_processes` (default 4) agent processes at once. Past that, `spawn_node` and
+  `ask_agent` are refused with a list of what's running, so the agent (or you) can close something.
+- **Idle reaping.** Spawned nodes and background processes unused for `idle_timeout_minutes`
+  (default 30) are closed. A background session reaped this way resumes on its next `ask_agent`.
+- **Your own sessions are never touched.** They show up in `ps` but don't count against the cap,
+  and neither `kill` nor `kill_node` will close them.
+- **Restarts.** Spawned nodes are recorded in `~/.agent-mesh/nodes.json`, and a restarted hub
+  re-adopts any `mesh-*` tmux session it finds, so nothing becomes an orphan you can't see.
 
 **How a message arrives** depends on where the recipient runs:
 
@@ -131,8 +164,11 @@ background (`~/.agent-mesh/hub.sock`, private to your user); you never start it 
 
 Watch a spawned node with `tmux attach -t mesh-<node-id>` (the id `spawn_node` returned).
 
-Each message carries a hop count; replies past `max_ask_depth` hops are refused, and one node can
-send another at most 6 messages a minute, so two agents answering each other cannot loop forever.
+Messages carry **your authority**: every node is one of your sessions, so a message arrives as a
+normal prompt with a footer naming the sender and how to reply. That also means any agent on the
+mesh can direct any other, including ones running with permissions bypassed; the process cap, a hop
+limit (`max_ask_depth`), and a limit of 6 messages a minute between any two nodes are the guardrails
+against runaway loops.
 
 **Claude Code hooks** — add to `~/.claude/settings.json`:
 
@@ -154,14 +190,19 @@ the session it belongs to.
 
 ## Configuration
 
-It works with no config at all. To customize, drop an `agents.toml` in your working directory, or
-point `AGENT_MESH_CONFIG` at one, or use `~/.config/agent-mesh/agents.toml`.
+It works with no config at all. To customize, use `~/.config/agent-mesh/agents.toml` or point
+`AGENT_MESH_CONFIG` at a file. The hub reads it once, from your home directory, and it applies to
+every agent on the mesh; restart the hub (`pkill -f "agent-mesh hub"`) to pick up changes.
 
 ```toml
 # How many sessions one relay may pass through before it is refused.
 max_ask_depth = 4
 # How long to wait for a single agent turn.
 turn_timeout_seconds = 300
+# Most agent processes the hub runs at once (spawned nodes + background ask_agent processes).
+max_processes = 4
+# Close spawned nodes and background processes unused for this long. 0 disables it.
+idle_timeout_minutes = 30
 
 [agents.opencode]
 transport = "acp"
@@ -285,6 +326,10 @@ skip themselves when `opencode` isn't installed.
 - `ask_agent` on a session that is also open in a TUI resumes a separate headless copy; use
   `send_message` to reach the live one
 - Spawned nodes run with each agent's permission-bypass flag, matching the headless transports
+- Configuration is read by the hub, from your home directory; a project-local `agents.toml` no
+  longer applies (use `~/.config/agent-mesh/agents.toml` or `$AGENT_MESH_CONFIG`)
+- After upgrading, restart your agent CLIs and run `pkill -f "agent-mesh hub"`: an old client and a
+  new hub (or the reverse) refuse to talk, by design
 - Codex reports usage per turn; other agents vary in what they report at all
 
 ## License

@@ -40,6 +40,10 @@ impl Identity {
                 pid: Some(pid),
                 tmux_pane: std::env::var("TMUX_PANE").ok(),
                 tmux_session: None,
+                // The hub fills these in for nodes it spawned; a self-registering session is the
+                // user's own.
+                spawned_by: None,
+                started_at_unix: 0,
             }),
         }
     }
@@ -86,6 +90,15 @@ pub async fn call_if_running(request: &Request) -> Option<serde_json::Value> {
     exchange(stream, request).await.ok()
 }
 
+/// Like `call_if_running`, but reports why it failed. For `agent-mesh kill`, which must say so
+/// when the hub refuses rather than silently doing nothing.
+pub async fn call_existing(request: &Request) -> Result<serde_json::Value, HubError> {
+    let stream = UnixStream::connect(hub::socket_path()).await.map_err(|_| {
+        HubError::Refused("no agent-mesh hub is running, so there is nothing to stop".to_owned())
+    })?;
+    exchange(stream, request).await
+}
+
 async fn exchange(stream: UnixStream, request: &Request) -> Result<serde_json::Value, HubError> {
     let (read, mut write) = stream.into_split();
     // Serialize by reference: the envelope only borrows the request.
@@ -100,7 +113,8 @@ async fn exchange(stream: UnixStream, request: &Request) -> Result<serde_json::V
     BufReader::new(read).read_line(&mut line).await?;
     match serde_json::from_str::<Response>(&line)? {
         Response::Ok { data } => Ok(data),
-        Response::Error { message } => Err(HubError::Refused(message)),
+        Response::Error { message, internal: false } => Err(HubError::Refused(message)),
+        Response::Error { message, internal: true } => Err(HubError::Internal(message)),
     }
 }
 
@@ -140,7 +154,14 @@ fn start_hub() -> Result<(), HubError> {
         .append(true)
         .open(dir.join("hub.log"))?;
 
-    std::process::Command::new(std::env::current_exe()?)
+    // Started from home so the hub's config (it is hub-wide now) never depends on which client's
+    // working directory happened to launch it.
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    if let Some(home) = home {
+        command.current_dir(home);
+    }
+    command
         .arg("hub")
         .env_remove(mesh_core::HEADLESS_ENV)
         .stdin(Stdio::null())

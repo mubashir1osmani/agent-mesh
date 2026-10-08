@@ -20,6 +20,15 @@ pub struct Config {
     #[serde(default = "default_timeout")]
     pub turn_timeout_seconds: u64,
 
+    /// Most agent processes the hub will run at once: spawned tmux nodes plus headless `ask_agent`
+    /// processes. Sessions the user started themselves are not counted.
+    #[serde(default = "default_max_processes")]
+    pub max_processes: usize,
+
+    /// Spawned nodes and headless processes untouched for this long are closed. 0 disables it.
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_minutes: u64,
+
     #[serde(default)]
     pub agents: BTreeMap<String, AgentConfig>,
 
@@ -33,6 +42,14 @@ fn default_max_chain() -> usize {
 
 fn default_timeout() -> u64 {
     300
+}
+
+fn default_max_processes() -> usize {
+    4
+}
+
+fn default_idle_timeout() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +149,8 @@ impl Config {
         Self {
             max_ask_depth: default_max_chain(),
             turn_timeout_seconds: default_timeout(),
+            max_processes: default_max_processes(),
+            idle_timeout_minutes: default_idle_timeout(),
             telemetry: mesh_telemetry::TelemetryConfig::default(),
             agents: BTreeMap::from([
                 (
@@ -241,6 +260,8 @@ mod tests {
 
         assert_eq!(cfg.max_ask_depth, 4);
         assert_eq!(cfg.turn_timeout_seconds, 300);
+        assert_eq!(cfg.max_processes, 4);
+        assert_eq!(cfg.idle_timeout_minutes, 30);
         assert_eq!(cfg.agents["codex"].command(), "codex");
         assert!(cfg.agents["codex"].enabled());
     }

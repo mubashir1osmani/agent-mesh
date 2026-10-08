@@ -6,19 +6,34 @@
 use crate::client::{self, Identity};
 use crate::config::Config;
 use crate::hub::{HubError, Message, Node, Request};
-use crate::mesh::{Mesh, MeshError};
 use crate::tmux;
-use mesh_core::{AgentId, AskChain, SessionRef, Speaker, VendorSessionId};
+use mesh_core::{
+    AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId,
+};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// One MCP client's view of the mesh. It owns no agent processes: every session tool is
+/// forwarded to the hub, which runs them all so it can count and close them.
 pub struct MeshServer {
-    mesh: Arc<Mesh>,
+    /// Capabilities of each configured agent, for `list_agents`. Static, so computed locally.
+    agents: Vec<(AgentId, Capabilities)>,
     config: Arc<Config>,
     identity: Arc<Identity>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct KillNodeArgs {
+    /// Node id from `list_nodes` or `spawn_node`. Only nodes the mesh spawned can be closed.
+    pub node: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct KillResult {
+    pub killed: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -203,14 +218,14 @@ pub struct TranscriptResult {
     pub turns: Vec<TurnInfo>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionOpened {
     /// Pass this as `session` to `ask_agent` and `read_session`.
     pub session: String,
     pub agent: String,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UsageEntry {
     pub agent: String,
     pub turns: u64,
@@ -239,12 +254,35 @@ pub struct SessionAttached {
 
 #[tool_router(server_handler)]
 impl MeshServer {
-    pub fn new(mesh: Arc<Mesh>, config: Arc<Config>, identity: Arc<Identity>) -> Self {
+    pub fn new(
+        agents: Vec<(AgentId, Capabilities)>,
+        config: Arc<Config>,
+        identity: Arc<Identity>,
+    ) -> Self {
         Self {
-            mesh,
+            agents,
             config,
             identity,
         }
+    }
+
+    #[tool(
+        name = "kill_node",
+        description = "Close a node the mesh spawned (with spawn_node), stopping its agent and \
+                       tmux session. Use it when a spawned agent has finished or the mesh is at \
+                       its process limit. Sessions the user started themselves cannot be closed."
+    )]
+    async fn kill_node(
+        &self,
+        Parameters(args): Parameters<KillNodeArgs>,
+    ) -> Result<Json<KillResult>, ErrorData> {
+        let data = client::call(&Request::Kill {
+            target: Some(args.node),
+            all: false,
+        })
+        .await
+        .map_err(hub_error)?;
+        Ok(Json(from_value(data)?))
     }
 
     #[tool(
@@ -383,11 +421,11 @@ impl MeshServer {
     fn list_agents(&self) -> Json<AgentList> {
         Json(AgentList {
             agents: self
-                .mesh
-                .agents()
+                .agents
+                .iter()
                 .map(|(agent, caps)| AgentInfo {
                     agent: agent.to_string(),
-                    installed: self.mesh.is_installed(&self.config, agent),
+                    installed: crate::mesh::is_installed(&self.config, agent),
                     can_resume: caps.resume,
                     reports_cost: caps.reports_cost,
                 })
@@ -401,19 +439,17 @@ impl MeshServer {
                        directory. Returns a session handle to pass to ask_agent. The agent \
                        process starts on the first ask_agent call, not here."
     )]
-    fn open_session(
+    async fn open_session(
         &self,
         Parameters(args): Parameters<OpenSessionArgs>,
     ) -> Result<Json<SessionOpened>, ErrorData> {
-        let agent = AgentId::new(args.agent.as_str());
-        let session = self
-            .mesh
-            .open_session(&agent, &PathBuf::from(&args.cwd))
-            .map_err(to_mcp_error)?;
-        Ok(Json(SessionOpened {
-            session: session.to_string(),
-            agent: agent.to_string(),
-        }))
+        let data = client::call(&Request::OpenSession {
+            agent: args.agent,
+            cwd: absolute(&args.cwd),
+        })
+        .await
+        .map_err(hub_error)?;
+        Ok(Json(from_value(data)?))
     }
 
     #[tool(
@@ -427,20 +463,17 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<AttachSessionArgs>,
     ) -> Result<Json<SessionAttached>, ErrorData> {
-        let agent = AgentId::new(args.agent.as_str());
-        let (session, transcript) = self
-            .mesh
-            .attach_session(
-                &agent,
-                &VendorSessionId::new(args.session_id.as_str()),
-                &PathBuf::from(&args.cwd),
-            )
-            .await
-            .map_err(to_mcp_error)?;
-
+        let data = client::call(&Request::AttachSession {
+            agent: args.agent,
+            session_id: args.session_id,
+            cwd: absolute(&args.cwd),
+        })
+        .await
+        .map_err(hub_error)?;
+        let transcript: Transcript = from_value(data["transcript"].clone())?;
         Ok(Json(SessionAttached {
-            session: session.to_string(),
-            agent: agent.to_string(),
+            session: data["session"].as_str().unwrap_or_default().to_owned(),
+            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
             turns: to_turns(&transcript, None),
         }))
     }
@@ -457,30 +490,21 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<AskArgs>,
     ) -> Result<Json<AskResult>, ErrorData> {
-        let session = SessionRef::parse(args.session.as_str());
-        let chain = AskChain::from_hops(args.via.iter().map(|h| SessionRef::parse(h.as_str())));
-
-        let (reply, next) = self
-            .mesh
-            .ask(&session, &args.prompt, &chain)
-            .await
-            .map_err(to_mcp_error)?;
-
-        let agent = self
-            .mesh
-            .sessions(None)
-            .into_iter()
-            .find(|e| e.session == session)
-            .map(|e| e.agent.to_string())
-            .unwrap_or_default();
-
+        let data = client::call(&Request::Ask {
+            session: args.session,
+            prompt: args.prompt,
+            via: args.via,
+        })
+        .await
+        .map_err(hub_error)?;
+        let reply: Reply = from_value(data["reply"].clone())?;
         Ok(Json(AskResult {
             reply: reply.text,
-            agent,
+            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
             input_tokens: reply.usage.input_tokens,
             output_tokens: reply.usage.output_tokens,
             cost_usd: reply.cost.map(|c| c.as_usd()),
-            via: next.hops().iter().map(SessionRef::to_string).collect(),
+            via: from_value(data["via"].clone())?,
         }))
     }
 
@@ -493,50 +517,29 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<ReadSessionArgs>,
     ) -> Result<Json<TranscriptResult>, ErrorData> {
-        let session = SessionRef::parse(args.session.as_str());
-        let transcript = self
-            .mesh
-            .read_session(&session)
-            .await
-            .map_err(to_mcp_error)?;
-
-        let agent = self
-            .mesh
-            .sessions(None)
-            .into_iter()
-            .find(|e| e.session == session)
-            .map(|e| e.agent.to_string())
-            .unwrap_or_default();
-
+        let data = client::call(&Request::ReadSession {
+            session: args.session,
+        })
+        .await
+        .map_err(hub_error)?;
+        let transcript: Transcript = from_value(data["transcript"].clone())?;
         Ok(Json(TranscriptResult {
-            agent,
+            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
             turns: to_turns(&transcript, args.last),
         }))
     }
 
     #[tool(
         name = "get_usage",
-        description = "Report tokens and cost spent per agent so far in this mesh process. Use it \
-                       to see what a relay actually cost. A null cost_usd means the agent does not \
-                       report spend, not that it was free."
+        description = "Report tokens and cost spent per agent since the mesh hub started, across \
+                       every agent using it. Use it to see what a relay actually cost. A null \
+                       cost_usd means the agent does not report spend, not that it was free."
     )]
-    fn get_usage(&self) -> Json<UsageReport> {
-        Json(UsageReport {
-            usage: self
-                .mesh
-                .usage()
-                .all()
-                .into_iter()
-                .map(|(agent, u)| UsageEntry {
-                    agent: agent.to_string(),
-                    turns: u.turns,
-                    input_tokens: u.input_tokens,
-                    output_tokens: u.output_tokens,
-                    cost_usd: u.cost_usd(),
-                    cost_is_complete: u.cost_is_complete(),
-                })
-                .collect(),
-        })
+    async fn get_usage(&self) -> Result<Json<UsageReport>, ErrorData> {
+        let data = client::call(&Request::Usage).await.map_err(hub_error)?;
+        Ok(Json(UsageReport {
+            usage: from_value(data)?,
+        }))
     }
 
     #[tool(
@@ -549,9 +552,14 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<ListSessionsArgs>,
     ) -> Result<Json<SessionList>, ErrorData> {
-        let filter = args.agent.as_deref().map(AgentId::new);
-
-        let known = self.mesh.sessions(filter.as_ref());
+        let data = client::call(&Request::ListSessions {
+            agent: args.agent.clone(),
+            discover_in: args.discover_in.as_deref().map(absolute),
+        })
+        .await
+        .map_err(hub_error)?;
+        let known: Vec<SessionEntry> = from_value(data["known"].clone())?;
+        let found: Vec<String> = from_value(data["discovered"].clone())?;
         let mut listed: Vec<SessionInfo> = known
             .iter()
             .map(|entry| SessionInfo {
@@ -564,12 +572,7 @@ impl MeshServer {
             .collect();
 
         // Discovery needs a specific agent to ask, since ids are per-agent.
-        if let (Some(cwd), Some(agent)) = (args.discover_in.as_deref(), filter.as_ref()) {
-            let found = self
-                .mesh
-                .discover(agent, &PathBuf::from(cwd))
-                .await
-                .map_err(to_mcp_error)?;
+        if let (Some(cwd), Some(agent)) = (args.discover_in.as_deref(), args.agent.as_deref()) {
             let already: Vec<_> = known
                 .iter()
                 .filter_map(|e| e.state.vendor().map(VendorSessionId::to_string))
@@ -577,13 +580,13 @@ impl MeshServer {
             listed.extend(
                 found
                     .into_iter()
-                    .filter(|v| !already.contains(&v.to_string()))
+                    .filter(|v| !already.contains(v))
                     .map(|vendor| SessionInfo {
                         session: String::new(),
-                        agent: agent.to_string(),
+                        agent: agent.to_owned(),
                         cwd: cwd.to_owned(),
                         state: "unattached".to_owned(),
-                        agent_session_id: Some(vendor.to_string()),
+                        agent_session_id: Some(vendor),
                     }),
             );
         }
@@ -594,11 +597,24 @@ impl MeshServer {
 
 fn hub_error(err: HubError) -> ErrorData {
     match err {
-        // The hub refused on the merits (unknown node, loop guard, rate limit): the caller can fix
-        // it by asking differently.
+        // The hub refused on the merits (unknown node, loop guard, cap): the caller can fix it by
+        // asking differently.
         HubError::Refused(message) => ErrorData::invalid_params(message, None),
+        HubError::Internal(message) => ErrorData::internal_error(message, None),
         other => ErrorData::internal_error(other.to_string(), None),
     }
+}
+
+/// The hub runs in its own directory, so a relative cwd must be resolved against this client's
+/// before it is sent, or it would land somewhere else entirely.
+fn absolute(cwd: &str) -> String {
+    let path = PathBuf::from(cwd);
+    if path.is_absolute() {
+        return cwd.to_owned();
+    }
+    std::env::current_dir()
+        .map(|here| here.join(path).display().to_string())
+        .unwrap_or_else(|_| cwd.to_owned())
 }
 
 fn from_value<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, ErrorData> {
@@ -631,36 +647,22 @@ fn to_turns(transcript: &mesh_core::Transcript, last: Option<usize>) -> Vec<Turn
         .collect()
 }
 
-/// Map a mesh failure onto MCP's error shape. Exhaustive so a new failure mode cannot silently
-/// fall through to a generic message.
-fn to_mcp_error(err: MeshError) -> ErrorData {
-    let message = err.to_string();
-    match err {
-        // Caller passed something wrong; these are recoverable by asking differently.
-        MeshError::UnknownAgent { .. }
-        | MeshError::BadCwd { .. }
-        | MeshError::AskRefused { .. } => ErrorData::invalid_params(message, None),
-        MeshError::Transport(inner) => match inner {
-            mesh_core::TransportError::UnknownSession { .. } => {
-                ErrorData::invalid_params(message, None)
-            }
-            mesh_core::TransportError::ResumeUnsupported { .. }
-            | mesh_core::TransportError::Unreachable { .. }
-            | mesh_core::TransportError::Spawn { .. }
-            | mesh_core::TransportError::ConnectionClosed { .. }
-            | mesh_core::TransportError::Protocol { .. }
-            | mesh_core::TransportError::AgentRefused { .. }
-            | mesh_core::TransportError::Timeout { .. }
-            | mesh_core::TransportError::Cancelled { .. }
-            | mesh_core::TransportError::Decode { .. } => ErrorData::internal_error(message, None),
-        },
+/// Map a mesh failure onto MCP's error shape. The hub uses the same classification when it sends
+/// a failure back over the socket.
+#[cfg(test)]
+fn to_mcp_error(err: crate::mesh::MeshError) -> ErrorData {
+    if err.is_callers_fault() {
+        ErrorData::invalid_params(err.to_string(), None)
+    } else {
+        ErrorData::internal_error(err.to_string(), None)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mesh_core::{Transcript, Turn};
+    use crate::mesh::MeshError;
+    use mesh_core::Turn;
 
     fn transcript() -> Transcript {
         Transcript::from_turns([
@@ -806,6 +808,7 @@ mod schema_tests {
             "check_inbox",
             "spawn_node",
             "peek_node",
+            "kill_node",
         ] {
             assert!(
                 names.contains(&expected.to_owned()),

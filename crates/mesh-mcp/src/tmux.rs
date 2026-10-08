@@ -12,6 +12,10 @@ use tokio::process::Command;
 /// already knows (or a headless `ask_agent` child) and must not register a second one.
 pub const NODE_ENV: &str = "AGENT_MESH_NODE";
 
+/// Every tmux session the hub creates is named `mesh-<node-id>`, which is how a restarted hub
+/// finds its nodes again.
+pub const SESSION_PREFIX: &str = "mesh-";
+
 /// Claude Code drops an Enter that lands in the same instant as a paste; this gap was enough in
 /// manual testing against both claude and codex.
 const SUBMIT_DELAY: Duration = Duration::from_millis(400);
@@ -71,7 +75,7 @@ pub fn command_line(agent: &str, program: &str, prompt: Option<&str>) -> Vec<Str
 }
 
 pub async fn spawn(launch: &Launch<'_>) -> Result<Spawned, TmuxError> {
-    let session = format!("mesh-{}", launch.node_id);
+    let session = format!("{SESSION_PREFIX}{}", launch.node_id);
     let argv = command_line(launch.agent, launch.program, launch.prompt);
 
     let mut args: Vec<String> = [
@@ -161,6 +165,46 @@ pub async fn paste(pane: &str, text: &str) -> Result<(), TmuxError> {
     ])
     .await?;
     Ok(())
+}
+
+pub struct Found {
+    pub session: String,
+    pub pane: String,
+    pub pid: u32,
+}
+
+/// Every live `mesh-*` tmux session. An absent tmux server means none, not an error.
+pub async fn list_mesh_sessions() -> Result<Vec<Found>, TmuxError> {
+    let out = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let (session, pane, pid) = (cols.next()?, cols.next()?, cols.next()?);
+            session.starts_with(SESSION_PREFIX).then(|| Found {
+                session: session.to_owned(),
+                pane: pane.to_owned(),
+                pid: pid.parse().unwrap_or(0),
+            })
+        })
+        .filter(|f| f.pid != 0)
+        .collect())
+}
+
+pub async fn kill_session(session: &str) -> Result<(), TmuxError> {
+    run(&[
+        "kill-session".to_owned(),
+        "-t".to_owned(),
+        session.to_owned(),
+    ])
+    .await
+    .map(|_| ())
 }
 
 /// The visible contents of a pane, for `peek_node`.

@@ -285,6 +285,29 @@ impl AgentTransport for ClaudeTransport {
             reports_cost: true,
         }
     }
+
+    async fn pids(&self) -> Vec<u32> {
+        let sessions: Vec<Arc<Session>> = self.sessions.lock().await.values().cloned().collect();
+        let mut pids = Vec::new();
+        for session in sessions {
+            if let Some(pid) = session.child.lock().await.id() {
+                pids.push(pid);
+            }
+        }
+        pids
+    }
+
+    /// Every claude session is its own process.
+    async fn would_spawn(&self, _cwd: &Path) -> bool {
+        true
+    }
+
+    async fn shutdown(&self) {
+        let drained: Vec<Arc<Session>> = self.sessions.lock().await.drain().map(|(_, s)| s).collect();
+        for session in drained {
+            session.shutdown().await;
+        }
+    }
 }
 
 /// Turn a terminal `result` event into a reply.
