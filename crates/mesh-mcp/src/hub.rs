@@ -26,7 +26,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 /// Bumped on any incompatible change to `Request` or `Response`, so an old client talking to a
 /// new hub fails with a clear message instead of a decode error.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// How many messages one node may send another per `RATE_WINDOW`. Two agents replying to each
 /// other's replies would otherwise ping-pong for as long as the hop limit allows, burning tokens
@@ -39,6 +39,10 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 pub struct Node {
     /// Stable name other agents address this node by.
     pub id: String,
+    /// Name the spawner gave it with `spawn_node`. `send_message` and `kill_node` accept it in
+    /// place of the id. Never set on sessions the user started themselves.
+    #[serde(default)]
+    pub name: Option<String>,
     pub agent: String,
     pub cwd: String,
     /// The agent CLI's process id; the node is dropped when it exits.
@@ -136,10 +140,13 @@ pub enum Request {
         prompt: Option<String>,
         #[serde(default)]
         from: Option<String>,
+        /// Optional name to address the node by, alongside its generated id.
+        #[serde(default)]
+        name: Option<String>,
     },
     /// Everything the hub is running, with memory, for `agent-mesh ps`.
     Ps,
-    /// Stop one hub-owned process (a node id, or `<agent>/headless`), or all of them.
+    /// Stop one hub-owned process (a node id or name, or `<agent>/<pid>`), or all of them.
     Kill {
         #[serde(default)]
         target: Option<String>,
@@ -526,7 +533,8 @@ impl Hub {
                 cwd,
                 prompt,
                 from,
-            } => Ok(self.spawn(agent, cwd, prompt, from).await?),
+                name,
+            } => Ok(self.spawn(agent, cwd, prompt, from, name).await?),
             Request::Ps => Ok(to_value(&self.ps().await)?),
             Request::Kill { target, all } => Ok(self.kill(target, all).await?),
             Request::OpenSession { agent, cwd, from } => {
@@ -773,6 +781,12 @@ impl Hub {
             self.with(|s| s.nodes.values().filter(|n| n.is_managed()).cloned().collect());
         let mut killed = Vec::new();
 
+        // A node's name resolves to its id; anything else (a headless `<agent>/<pid>`) is matched
+        // as given.
+        let target = match target {
+            Some(t) if !all => Some(self.with(|s| resolve(s, &t))?.unwrap_or(t)),
+            other => other,
+        };
         let wanted = |id: &str| all || target.as_deref() == Some(id);
 
         for node in &managed {
@@ -906,6 +920,7 @@ impl Hub {
                 .unwrap_or_else(|| Node {
                     agent: id.split('-').next().unwrap_or("unknown").to_owned(),
                     id: id.clone(),
+                    name: None,
                     cwd: String::new(),
                     pid: Some(found.pid),
                     tmux_pane: Some(found.pane.clone()),
@@ -940,14 +955,16 @@ impl Hub {
                  ({limit}); agents replying to replies would otherwise loop"
             ));
         }
+        self.prune().await;
+        let (to, target) = self
+            .with(|s| {
+                let id = resolve(s, &to)?;
+                Ok::<_, String>(id.and_then(|id| Some((id.clone(), s.nodes.get(&id)?.clone()))))
+            })?
+            .ok_or_else(|| format!("no live node `{to}`; call list_nodes to see who is online"))?;
         if from == to {
             return Err("a node cannot message itself".to_owned());
         }
-
-        self.prune().await;
-        let target = self
-            .with(|s| s.nodes.get(&to).cloned())
-            .ok_or_else(|| format!("no live node `{to}`; call list_nodes to see who is online"))?;
 
         self.with(|s| {
             let window = s.recent.entry((from.clone(), to.clone())).or_default();
@@ -1009,7 +1026,14 @@ impl Hub {
         cwd: String,
         prompt: Option<String>,
         from: Option<String>,
+        name: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let name = match name {
+            Some(n) if n.trim().is_empty() => {
+                return Err("`name` must not be empty or whitespace; omit it instead".to_owned());
+            }
+            other => other.map(|n| n.trim().to_owned()),
+        };
         let program = self
             .config
             .agents
@@ -1059,6 +1083,7 @@ impl Hub {
 
         let node = Node {
             id: id.clone(),
+            name,
             agent,
             cwd: cwd.display().to_string(),
             pid: Some(spawned.pid),
@@ -1107,12 +1132,16 @@ impl Hub {
 /// own server cannot see `AGENT_MESH_NODE` and registers under a fresh id. The agent pid is the
 /// ground truth: a registration for a pid the hub already has keeps the existing id, and the
 /// tmux details recorded at spawn time.
+///
+/// A name only ever comes from `spawn`: registration keeps the one already recorded and ignores
+/// any it is sent, so a session the user started is never renamed.
 fn register(state: &mut State, mut node: Node) -> String {
     let existing = state
         .nodes
         .values()
         .find(|n| n.id == node.id || (node.pid.is_some() && n.pid == node.pid))
         .cloned();
+    node.name = existing.as_ref().and_then(|k| k.name.clone());
     if let Some(known) = existing {
         node.id = known.id;
         node.tmux_session = node.tmux_session.or(known.tmux_session);
@@ -1126,6 +1155,30 @@ fn register(state: &mut State, mut node: Node) -> String {
     state.inboxes.entry(id.clone()).or_default();
     state.nodes.insert(id.clone(), node);
     id
+}
+
+/// The id of the one live node whose id or name is `target`, `None` if there is none, or an error
+/// if a name is shared by more than one, since guessing would message or kill the wrong agent.
+///
+/// An exact id always wins, so a name can never make another node unreachable by its id.
+fn resolve(state: &State, target: &str) -> Result<Option<String>, String> {
+    if state.nodes.contains_key(target) {
+        return Ok(Some(target.to_owned()));
+    }
+    let matches: Vec<&str> = state
+        .nodes
+        .values()
+        .filter(|n| n.name.as_deref() == Some(target))
+        .map(|n| n.id.as_str())
+        .collect();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [id] => Ok(Some((*id).to_owned())),
+        ids => Err(format!(
+            "`{target}` matches more than one live node ({}); use the node id instead",
+            ids.join(", ")
+        )),
+    }
 }
 
 /// Releases an in-flight mark when an ask finishes, however it finishes.
@@ -1312,6 +1365,7 @@ mod tests {
     fn node(id: &str) -> Node {
         Node {
             id: id.to_owned(),
+            name: None,
             agent: "claude".to_owned(),
             cwd: "/tmp".to_owned(),
             // Our own pid: alive for the duration of the test, so pruning keeps it.
@@ -1457,6 +1511,143 @@ mod tests {
         register(&hub, "a").await;
         let err = hub.dispatch(send("a", "ghost", 0)).await.unwrap_err().message;
         assert!(err.contains("list_nodes"), "got: {err}");
+    }
+
+    /// Names are only set by `spawn`, which needs tmux, so tests set them on the stored node.
+    fn name(hub: &Hub, id: &str, name: &str) {
+        hub.with(|s| s.nodes.get_mut(id).unwrap().name = Some(name.to_owned()));
+    }
+
+    #[tokio::test]
+    async fn a_node_can_be_messaged_by_its_name() {
+        let hub = hub();
+        register(&hub, "a").await;
+        register(&hub, "codex-1234").await;
+        name(&hub, "codex-1234", "reviewer");
+
+        let sent = hub.dispatch(send("a", "reviewer", 0)).await.unwrap();
+        assert_eq!(sent["to"], "codex-1234", "the reply names the resolved id");
+
+        let drained = hub
+            .dispatch(Request::Inbox {
+                node: Some("codex-1234".to_owned()),
+                pid: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(drained.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_node_cannot_message_itself_by_name() {
+        let hub = hub();
+        register(&hub, "a").await;
+        name(&hub, "a", "me");
+        let err = hub.dispatch(send("a", "me", 0)).await.unwrap_err().message;
+        assert!(err.contains("itself"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_name_shared_by_two_nodes_is_refused_for_send_and_kill() {
+        let hub = hub();
+        register(&hub, "a").await;
+        register(&hub, "b").await;
+        register(&hub, "c").await;
+        name(&hub, "b", "twin");
+        name(&hub, "c", "twin");
+
+        let err = hub.dispatch(send("a", "twin", 0)).await.unwrap_err().message;
+        assert!(err.contains("more than one") && err.contains("b, c"), "got: {err}");
+
+        let err = hub
+            .dispatch(Request::Kill {
+                target: Some("twin".to_owned()),
+                all: false,
+            })
+            .await
+            .unwrap_err()
+            .message;
+        assert!(err.contains("more than one"), "got: {err}");
+    }
+
+    /// The spawned agent's own server re-registers with no name before every call.
+    #[tokio::test]
+    async fn re_registering_keeps_the_name_and_cannot_set_one() {
+        let hub = hub();
+        register(&hub, "a").await;
+        name(&hub, "a", "reviewer");
+        register(&hub, "a").await;
+
+        hub.dispatch(Request::Register {
+            node: Node {
+                pid: None,
+                name: Some("impostor".to_owned()),
+                ..node("user-session")
+            },
+        })
+        .await
+        .unwrap();
+
+        let listed: Vec<Node> =
+            serde_json::from_value(hub.dispatch(Request::List).await.unwrap()).unwrap();
+        let by_id = |id: &str| listed.iter().find(|n| n.id == id).unwrap().name.clone();
+        assert_eq!(by_id("a").as_deref(), Some("reviewer"));
+        assert_eq!(by_id("user-session"), None, "registration never names a node");
+    }
+
+    #[tokio::test]
+    async fn a_spawned_node_can_be_killed_by_name_but_a_user_session_cannot() {
+        let hub = hub();
+        hub.dispatch(Request::Register {
+            node: Node {
+                pid: None,
+                spawned_by: Some("user".to_owned()),
+                ..node("codex-1234")
+            },
+        })
+        .await
+        .unwrap();
+        name(&hub, "codex-1234", "reviewer");
+        register(&hub, "mine").await;
+        name(&hub, "mine", "mine-named");
+
+        let killed = hub
+            .dispatch(Request::Kill {
+                target: Some("reviewer".to_owned()),
+                all: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(killed["killed"], serde_json::json!(["codex-1234"]));
+
+        let err = hub
+            .dispatch(Request::Kill {
+                target: Some("mine-named".to_owned()),
+                all: false,
+            })
+            .await
+            .unwrap_err()
+            .message;
+        assert!(err.contains("the user started"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_blank_spawn_name_is_refused() {
+        let hub = hub();
+        for blank in ["", "   "] {
+            let err = hub
+                .dispatch(Request::Spawn {
+                    agent: "claude".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    prompt: None,
+                    from: None,
+                    name: Some(blank.to_owned()),
+                })
+                .await
+                .unwrap_err()
+                .message;
+            assert!(err.contains("name"), "got: {err}");
+        }
     }
 
     #[tokio::test]

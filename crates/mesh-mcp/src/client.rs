@@ -35,6 +35,7 @@ impl Identity {
         Self {
             node: Some(Node {
                 id,
+                name: None,
                 agent,
                 cwd,
                 pid: Some(pid),
