@@ -27,7 +27,8 @@ pub struct MeshServer {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct KillNodeArgs {
-    /// Node id from `list_nodes` or `spawn_node`. Only nodes the mesh spawned can be closed.
+    /// Node id from `list_nodes` or `spawn_node`, or the name it was spawned with. Only nodes the
+    /// mesh spawned can be closed.
     pub node: String,
 }
 
@@ -38,7 +39,7 @@ pub struct KillResult {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendMessageArgs {
-    /// Node id from `list_nodes`, e.g. `codex-3f9a1c2e`.
+    /// Node id from `list_nodes`, e.g. `codex-3f9a1c2e`, or the name it was spawned with.
     pub to: String,
     pub text: String,
     /// When replying to a mesh message, pass the `hops` value its header told you to. Omit for a
@@ -56,6 +57,10 @@ pub struct SpawnNodeArgs {
     /// First thing to tell the new agent. It is told the message came from you, so it can reply.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Optional name to address the node by, e.g. `reviewer`. send_message and kill_node accept
+    /// it as well as the generated id. Must not be empty.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -270,7 +275,8 @@ impl MeshServer {
         name = "kill_node",
         description = "Close a node the mesh spawned (with spawn_node), stopping its agent and \
                        tmux session. Use it when a spawned agent has finished or the mesh is at \
-                       its process limit. Sessions the user started themselves cannot be closed."
+                       its process limit. Pass its node id or the name it was spawned with. \
+                       Sessions the user started themselves cannot be closed."
     )]
     async fn kill_node(
         &self,
@@ -289,7 +295,8 @@ impl MeshServer {
         name = "list_nodes",
         description = "List the agent sessions running live on this machine right now (claude, \
                        codex, grok, ... in any terminal or tmux pane), including ones spawned \
-                       with spawn_node. Use a node's `id` with send_message. `you` is your own id."
+                       with spawn_node. Use a node's `id`, or its `name` if it has one, with \
+                       send_message. `you` is your own id."
     )]
     async fn list_nodes(&self) -> Result<Json<NodeList>, ErrorData> {
         let you = client::register(&self.identity).await.map_err(hub_error)?;
@@ -304,7 +311,8 @@ impl MeshServer {
         name = "send_message",
         description = "Send a message to another live agent node and return immediately; do not \
                        wait for an answer. Nodes in tmux get it typed straight into their session; \
-                       others receive it the next time they check. Replies arrive as a new \
+                       others receive it the next time they check. `to` is a node id or the \
+                       name a node was spawned with. Replies arrive as a new \
                        message in your session (or via check_inbox), framed with the sender's id."
     )]
     async fn send_message(
@@ -330,7 +338,7 @@ impl MeshServer {
         .await
         .map_err(hub_error)?;
         Ok(Json(SendResult {
-            to: args.to,
+            to: data["to"].as_str().unwrap_or(&args.to).to_owned(),
             delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
         }))
     }
@@ -354,9 +362,10 @@ impl MeshServer {
     #[tool(
         name = "spawn_node",
         description = "Start a new interactive agent (claude, codex, opencode, gemini, grok) in its \
-                       own tmux session, optionally with a first prompt. It joins the mesh as a \
-                       node you can send_message; its replies come back to you. The user can \
-                       watch it live with the returned `watch_with` command."
+                       own tmux session, optionally with a first prompt and a `name`. It joins \
+                       the mesh as a node you can send_message (by its id, or by the name you \
+                       gave it); its replies come back to you. The user can watch it live with \
+                       the returned `watch_with` command."
     )]
     async fn spawn_node(
         &self,
@@ -368,6 +377,7 @@ impl MeshServer {
             cwd: args.cwd,
             prompt: args.prompt,
             from,
+            name: args.name,
         })
         .await
         .map_err(hub_error)?;

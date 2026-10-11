@@ -119,11 +119,11 @@ the hub count them, cap them, and close them.
 | Tool | What it does |
 |---|---|
 | `list_nodes` | Live agent sessions on this machine, and which one is you |
-| `send_message` | Message a node and return immediately; the reply comes back as a message |
+| `send_message` | Message a node (by id or name) and return immediately; the reply comes back as a message |
 | `check_inbox` | Collect messages that were queued for you |
-| `spawn_node` | Start an agent in its own tmux session, optionally with a first prompt |
+| `spawn_node` | Start an agent in its own tmux session, optionally with a first prompt and a `name` |
 | `peek_node` | Read what is on a tmux node's screen without disturbing it |
-| `kill_node` | Close a node the mesh spawned |
+| `kill_node` | Close a node the mesh spawned, by id or name |
 
 ### Keeping track of what's running
 
@@ -169,6 +169,10 @@ killing a node stops that whole tree, not just the tmux session.
 - **Anything else**: it waits until the agent calls `check_inbox`.
 
 Watch a spawned node with `tmux attach -t mesh-<node-id>` (the id `spawn_node` returned).
+
+Give `spawn_node` a `name` (say `reviewer`) and `send_message`, `kill_node` and `agent-mesh kill`
+accept it as well as the generated id, which never changes. `list_nodes` shows it. A name shared by
+two live nodes is refused rather than guessed, and sessions you started yourself never get one.
 
 Messages carry **your authority**: every node is one of your sessions, so a message arrives as a
 normal prompt with a footer naming the sender and how to reply. That also means any agent on the
