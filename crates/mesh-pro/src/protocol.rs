@@ -46,35 +46,6 @@ pub enum DevicePoll {
     Expired,
 }
 
-impl DevicePoll {
-    pub fn entitlement(&self) -> Option<Entitlement> {
-        match self {
-            Self::Approved {
-                plan,
-                pro,
-                account_id,
-                email,
-                cache_ttl_seconds,
-                ..
-            } => Some(Entitlement {
-                plan: plan.clone(),
-                pro: *pro,
-                account_id: account_id.clone(),
-                email: email.clone(),
-                cache_ttl_seconds: *cache_ttl_seconds,
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn token(&self) -> Option<&str> {
-        match self {
-            Self::Approved { token, .. } => Some(token),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceTokenBody {
     pub device_code: String,

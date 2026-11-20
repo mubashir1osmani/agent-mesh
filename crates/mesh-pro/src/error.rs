@@ -1,10 +1,10 @@
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
-    #[error("could not store Crewmesh credentials: {0}")]
+    #[error("could not store credentials: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Crewmesh credentials are unreadable: {0}")]
+    #[error("could not read credentials: {0}")]
     Decode(#[from] serde_json::Error),
-    #[error("the Crewmesh API rejected the token")]
+    #[error("token was rejected")]
     Unauthorized,
 
     #[error("{0}")]
@@ -12,8 +12,8 @@ pub enum AccountError {
 
     #[error("{0}")]
     Unknown(String),
-    #[error("Crewmesh API error ({status}): {body}")]
+    #[error("request failed ({status}): {body}")]
     Api { status: u16, body: String },
-    #[error("could not reach the Crewmesh API at {url}: {message}")]
+    #[error("could not reach {url}: {message}")]
     Network { url: String, message: String },
 }

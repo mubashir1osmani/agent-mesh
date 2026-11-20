@@ -5,8 +5,7 @@ mod protocol;
 mod relay_client;
 
 pub use entitlement::{
-    Credentials, DEFAULT_API_BASE, DEFAULT_GRACE_SECONDS, Status, Store, logged_in, logout,
-    pro_enabled, upgrade_message,
+    Credentials, DEFAULT_API_BASE, Status, Store, logged_in, logout, pro_enabled, upgrade_message,
 };
 pub use error::AccountError;
 pub use http::ApiClient;

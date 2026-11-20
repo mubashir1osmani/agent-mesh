@@ -34,7 +34,7 @@ macOS, one command (universal binary, Apple Silicon and Intel):
 brew install mubashir1osmani/agent-mesh/agent-mesh
 ```
 
-From source, which is the route on Linux; needs [Rust](https://rustup.rs) 1.88+ (edition 2024, and current dependencies such as `time`):
+From source, which is the route on Linux; needs [Rust](https://rustup.rs) 1.88+:
 
 ```bash
 git clone https://github.com/mubashir1osmani/agent-mesh.git

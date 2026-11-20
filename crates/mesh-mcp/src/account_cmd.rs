@@ -7,8 +7,7 @@ Usage:
   agent-mesh logout
   agent-mesh status
 
-`login` without --token prints a device code and waits for you to approve it at the URL it
-prints.
+Without --token, prints a URL and code and waits until the login is approved.
 ";
 
 pub async fn login(
@@ -45,18 +44,15 @@ pub async fn login(
     let api = ApiClient::new()?;
     if let Some(token) = token {
         let ent = store.login_with_token(&api, &api_base, &token).await?;
-        println!("logged in to {api_base}");
+        println!("Logged in.");
         print_entitlement(&ent);
         return Ok(());
     }
 
     let start = api.device_start(&api_base).await?;
-    println!(
-        "Open this URL and approve Crewmesh:\n  {}",
-        start.verification_url
-    );
+    println!("{}", start.verification_url);
     println!("Code: {}", start.user_code);
-    println!("Waiting for approval...");
+    println!("Waiting for approval.");
     let deadline = SystemTime::now() + Duration::from_secs(start.expires_in.max(1));
     let interval = Duration::from_secs(start.interval.max(1));
     loop {
@@ -70,16 +66,23 @@ pub async fn login(
                 eprintln!("that login code expired; run `agent-mesh login` to try again");
                 std::process::exit(1);
             }
-            approved @ DevicePoll::Approved { .. } => {
-                let token = approved
-                    .token()
-                    .ok_or("the API approved the login without a token")?
-                    .to_owned();
-                let ent = approved
-                    .entitlement()
-                    .ok_or("the API approved the login without an entitlement")?;
+            DevicePoll::Approved {
+                token,
+                plan,
+                pro,
+                account_id,
+                email,
+                cache_ttl_seconds,
+            } => {
+                let ent = Entitlement {
+                    plan,
+                    pro,
+                    account_id,
+                    email,
+                    cache_ttl_seconds,
+                };
                 store.save_session(&api_base, &token, &ent)?;
-                println!("logged in to {api_base}");
+                println!("Logged in.");
                 print_entitlement(&ent);
                 return Ok(());
             }
@@ -89,7 +92,7 @@ pub async fn login(
 
 pub fn logout() -> Result<(), Box<dyn std::error::Error>> {
     mesh_pro::logout()?;
-    println!("logged out. The local mesh is unchanged.");
+    println!("Logged out.");
     Ok(())
 }
 
@@ -97,13 +100,11 @@ pub async fn status() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::from_env();
     if store.load().is_none() {
         println!("Not logged in.");
-        println!("Cross-machine messaging needs a Pro account. Run `agent-mesh login`.");
         std::process::exit(1);
     }
     let api = ApiClient::new()?;
     match store.status(&api).await {
         Ok(status) => {
-            println!("Crewmesh account");
             println!("  api: {}", status.api_base.unwrap_or_default());
             if let Some(email) = &status.email {
                 println!("  email: {email}");
@@ -117,7 +118,7 @@ pub async fn status() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("  pro: {}", if status.pro { "yes" } else { "no" });
             if status.offline {
-                println!("  entitlement: offline, using the last cached answer");
+                println!("  offline, using the cached answer");
             }
             if let Some(until) = status.cache_valid_until_unix {
                 println!("  cache valid until unix {until}");

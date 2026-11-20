@@ -104,6 +104,7 @@ pub fn describe(agent: &AgentId) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     fn request(method: &str, params: serde_json::Value) -> Inbound {

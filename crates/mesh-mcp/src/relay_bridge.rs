@@ -42,7 +42,6 @@ pub(crate) struct Outbound {
 
 #[derive(Debug)]
 pub(crate) enum RemoteError {
-    NotPro(String),
     Unknown(String),
     Failed(String),
 }
@@ -50,9 +49,7 @@ pub(crate) enum RemoteError {
 impl std::fmt::Display for RemoteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotPro(message) | Self::Unknown(message) | Self::Failed(message) => {
-                f.write_str(message)
-            }
+            Self::Unknown(message) | Self::Failed(message) => f.write_str(message),
         }
     }
 }
@@ -99,8 +96,8 @@ impl RemoteMesh for LiveRemote {
 
 fn remote_error(err: mesh_pro::AccountError) -> RemoteError {
     match err {
-        mesh_pro::AccountError::NotPro(message) => RemoteError::NotPro(message),
         mesh_pro::AccountError::Unknown(message) => RemoteError::Unknown(message),
+        mesh_pro::AccountError::NotPro(message) => RemoteError::Failed(message),
         other => RemoteError::Failed(other.to_string()),
     }
 }
@@ -108,16 +105,12 @@ fn remote_error(err: mesh_pro::AccountError) -> RemoteError {
 pub(super) async fn run(hub: Arc<Hub>) {
     let mut was_on = false;
     loop {
-        if hub.relay.mode.load(Ordering::Acquire) != AUTO {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            continue;
-        }
         let on = mesh_pro::logged_in() && mesh_pro::pro_enabled().await;
         if on != was_on {
             if on {
-                tracing::info!("Crewmesh Pro relay enabled");
-            } else {
-                tracing::info!("Crewmesh Pro relay disabled");
+                tracing::info!("relay enabled");
+            } else if was_on {
+                tracing::info!("relay disabled");
                 disable(&hub);
             }
             was_on = on;
@@ -189,7 +182,7 @@ pub(super) async fn try_remote(
         Err(RemoteError::Unknown(message)) => {
             Err(format!("{message}; call list_nodes to see who is online"))
         }
-        Err(RemoteError::NotPro(message) | RemoteError::Failed(message)) => Err(message),
+        Err(RemoteError::Failed(message)) => Err(message),
     }
 }
 

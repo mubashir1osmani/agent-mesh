@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_API_BASE: &str = "https://api.crewmesh.dev";
 
-pub const DEFAULT_GRACE_SECONDS: u64 = 86_400;
+const DEFAULT_GRACE_SECONDS: u64 = 86_400;
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const CACHE_FILE: &str = "entitlement.json";
@@ -121,10 +121,6 @@ impl Store {
             timeout,
             api_base_override: None,
         }
-    }
-
-    pub fn dir(&self) -> &Path {
-        &self.dir
     }
 
     pub fn load(&self) -> Option<Credentials> {

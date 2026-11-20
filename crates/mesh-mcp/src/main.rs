@@ -28,10 +28,9 @@ Usage:
   agent-mesh kill --all      Stop every agent process the mesh spawned
   agent-mesh hook <event>    Claude Code hook: deliver queued mesh messages
                              (<event> is user-prompt-submit or stop)
-  agent-mesh login           Log in to Crewmesh (--token, or a device code)
-  agent-mesh logout          Forget the saved Crewmesh token
-  agent-mesh status          Show the account and whether Pro is enabled
-                             (`whoami` is an alias)
+  agent-mesh login           Log in
+  agent-mesh logout          Log out
+  agent-mesh status          Show the account (`whoami`)
   agent-mesh --version       Print the version and exit
   agent-mesh --help          Print this message and exit
 

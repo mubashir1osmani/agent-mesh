@@ -81,11 +81,11 @@ pub fn command_line(agent: &str, program: &str, prompt: Option<&str>) -> Vec<Str
 /// `exec "$0" "$@"` hands the arguments over untouched: the shell sources its startup files and
 /// then replaces itself with the agent, never interpreting the prompt.
 pub fn through_login_shell(argv: Vec<String>) -> Vec<String> {
-    wrap_with_shell(login_shell(), argv)
-}
-
-fn wrap_with_shell(shell: String, argv: Vec<String>) -> Vec<String> {
-    let mut wrapped = vec![shell, "-lic".to_owned(), "exec \"$0\" \"$@\"".to_owned()];
+    let mut wrapped = vec![
+        login_shell(),
+        "-lic".to_owned(),
+        "exec \"$0\" \"$@\"".to_owned(),
+    ];
     wrapped.extend(argv);
     wrapped
 }
@@ -339,10 +339,9 @@ mod tests {
 
     #[test]
     fn agents_without_a_positional_prompt_get_their_flag() {
-        assert_eq!(
-            command_line("opencode", "opencode", Some("hi")),
-            vec!["opencode", "--prompt", "hi"]
-        );
+        assert_eq!(command_line("opencode", "opencode", Some("hi")), vec![
+            "opencode", "--prompt", "hi"
+        ]);
         let gemini = command_line("gemini", "gemini", Some("hi"));
         assert_eq!(&gemini[gemini.len() - 2..], ["-i", "hi"]);
     }
