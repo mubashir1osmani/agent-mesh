@@ -438,6 +438,7 @@ fn which(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     fn mesh() -> Mesh {

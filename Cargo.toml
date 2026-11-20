@@ -7,6 +7,7 @@ members = [
     "crates/mesh-codex",
     "crates/mesh-telemetry",
     "crates/mesh-mcp",
+    "crates/mesh-pro",
 ]
 
 [workspace.package]
@@ -14,13 +15,11 @@ version = "0.0.4"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/mubashir1osmani/agent-mesh"
-description = "An MCP control plane that lets coding agents talk to each other's sessions"
 
 [workspace.dependencies]
 agent-client-protocol-schema = { version = "1.6", features = ["unstable_end_turn_token_usage"] }
 rmcp = { version = "2.2", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
@@ -29,7 +28,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.9"
-futures = "0.3"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

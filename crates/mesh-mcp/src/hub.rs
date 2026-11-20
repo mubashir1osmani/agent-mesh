@@ -24,6 +24,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "relay_bridge.rs"]
+mod relay_bridge;
+
 /// Bumped on any incompatible change to `Request` or `Response`, so an old client talking to a
 /// new hub fails with a clear message instead of a decode error.
 pub const PROTOCOL_VERSION: u32 = 3;
@@ -60,6 +63,8 @@ pub struct Node {
     pub spawned_by: Option<String>,
     #[serde(default)]
     pub started_at_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
 }
 
 impl Node {
@@ -284,12 +289,20 @@ pub async fn serve(config: Arc<Config>) -> Result<(), HubError> {
     };
     tracing::info!(socket = %path.display(), "hub listening");
 
-    let login = login_env().await;
-    tracing::info!(vars = login.len(), "loaded login-shell environment for agents");
-    mesh_core::set_spawn_env(login);
-
     let hub = Hub::new(config);
     hub.recover().await;
+
+    tokio::spawn(async {
+        let login = login_env().await;
+        let count = login.len();
+        mesh_core::set_spawn_env(login);
+        tracing::info!(vars = count, "loaded login-shell environment for agents");
+    });
+
+    let bridge = Arc::clone(&hub);
+    tokio::spawn(async move {
+        relay_bridge::run(bridge).await;
+    });
 
     // Reap idle spawned nodes and headless processes on a timer.
     let reaper = Arc::clone(&hub);
@@ -357,19 +370,28 @@ async fn handle(stream: UnixStream, hub: &Hub) -> Result<(), HubError> {
 }
 
 /// Variables that describe the shell that printed them rather than the user's setup.
-const SHELL_LOCAL_VARS: &[&str] = &["PWD", "OLDPWD", "SHLVL", "_", "TERM", "PS1", "PS2", "ZDOTDIR"];
+const SHELL_LOCAL_VARS: &[&str] = &[
+    "PWD", "OLDPWD", "SHLVL", "_", "TERM", "PS1", "PS2", "ZDOTDIR",
+];
 
 /// The user's login-shell environment, read once at startup by running `$SHELL -lic` and
 /// printing it after a marker (so anything `.zshrc` echoes is skipped). Empty if the shell is
 /// slow or fails; agents then get the hub's own environment, as before.
 async fn login_env() -> Vec<(String, String)> {
     const MARKER: &str = "\u{0}AGENT_MESH_ENV\u{0}";
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
-    let run = tokio::process::Command::new(&shell)
-        .args(["-lic", "printf '\\0AGENT_MESH_ENV\\0'; env -0"])
+    let shell = crate::tmux::login_shell();
+    let script = "printf '\\0AGENT_MESH_ENV\\0'; env -0";
+    let mut command = if let Some(setsid) = crate::tmux::setsid_program() {
+        let mut command = tokio::process::Command::new(setsid);
+        command.arg(&shell);
+        command
+    } else {
+        let mut command = tokio::process::Command::new(&shell);
+        command.process_group(0);
+        command
+    };
+    let run = command
+        .args(["-lic", script])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .output();
@@ -429,6 +451,7 @@ struct Hub {
     /// Held across "count, then start a process", for tmux spawns here and headless starts in
     /// the mesh alike, so no mix of concurrent requests can overshoot the cap.
     spawn_gate: Arc<tokio::sync::Mutex<()>>,
+    relay: relay_bridge::RelayHandle,
 }
 
 impl Hub {
@@ -448,6 +471,7 @@ impl Hub {
                 config,
                 state: Mutex::new(State::default()),
                 spawn_gate: gate,
+                relay: relay_bridge::RelayHandle::new(),
             }
         })
     }
@@ -506,7 +530,8 @@ impl Hub {
             }
             Request::List => {
                 self.prune().await;
-                let nodes: Vec<Node> = self.with(|s| s.nodes.values().cloned().collect());
+                let mut nodes: Vec<Node> = self.with(|s| s.nodes.values().cloned().collect());
+                nodes.extend(relay_bridge::remote_nodes(self));
                 Ok(to_value(&nodes)?)
             }
             Request::Send {
@@ -574,8 +599,7 @@ impl Hub {
                 via,
             } => {
                 let session = SessionRef::parse(session.as_str());
-                let chain =
-                    AskChain::from_hops(via.iter().map(|h| SessionRef::parse(h.as_str())));
+                let chain = AskChain::from_hops(via.iter().map(|h| SessionRef::parse(h.as_str())));
                 let outcome = {
                     let _busy = self.busy(&session);
                     self.mesh.ask(&session, &prompt, &chain).await
@@ -677,7 +701,11 @@ impl Hub {
     ) -> (Option<Instant>, bool, Option<String>) {
         self.with(|s| {
             let keys: Vec<String> = process.sessions.iter().map(SessionRef::to_string).collect();
-            let last = keys.iter().filter_map(|k| s.session_active.get(k)).max().copied();
+            let last = keys
+                .iter()
+                .filter_map(|k| s.session_active.get(k))
+                .max()
+                .copied();
             let busy = keys
                 .iter()
                 .any(|k| s.in_flight.get(k).is_some_and(|n| *n > 0));
@@ -696,10 +724,7 @@ impl Hub {
     /// Pane output is what keeps a node busy on a long task, or one the user is typing into, from
     /// looking idle.
     async fn node_activity(&self, node: &Node, recorded: Option<Instant>) -> Option<Instant> {
-        let pane = node
-            .tmux_session
-            .as_deref()
-            .map(tmux::last_activity_unix);
+        let pane = node.tmux_session.as_deref().map(tmux::last_activity_unix);
         let from_pane = match pane {
             Some(fut) => fut.await.map(|at| {
                 let ago = unix_now().saturating_sub(at);
@@ -777,8 +802,13 @@ impl Hub {
 
     /// Stop hub-owned processes. Sessions the user started are never touched.
     async fn kill(&self, target: Option<String>, all: bool) -> Result<serde_json::Value, String> {
-        let managed: Vec<Node> =
-            self.with(|s| s.nodes.values().filter(|n| n.is_managed()).cloned().collect());
+        let managed: Vec<Node> = self.with(|s| {
+            s.nodes
+                .values()
+                .filter(|n| n.is_managed())
+                .cloned()
+                .collect()
+        });
         let mut killed = Vec::new();
 
         // A node's name resolves to its id; anything else (a headless `<agent>/<pid>`) is matched
@@ -882,8 +912,13 @@ impl Hub {
 
     /// Save spawned nodes so a restarted hub keeps counting and can still kill them.
     fn persist(&self) {
-        let nodes: Vec<Node> =
-            self.with(|s| s.nodes.values().filter(|n| n.is_managed()).cloned().collect());
+        let nodes: Vec<Node> = self.with(|s| {
+            s.nodes
+                .values()
+                .filter(|n| n.is_managed())
+                .cloned()
+                .collect()
+        });
         let path = home_dir().join("nodes.json");
         match serde_json::to_vec_pretty(&nodes) {
             Ok(raw) => {
@@ -907,7 +942,10 @@ impl Hub {
         let now = Instant::now();
         let mut adopted = 0;
         for found in live {
-            let id = found.session.trim_start_matches(tmux::SESSION_PREFIX).to_owned();
+            let id = found
+                .session
+                .trim_start_matches(tmux::SESSION_PREFIX)
+                .to_owned();
             let node = saved
                 .iter()
                 .find(|n| n.id == id)
@@ -927,6 +965,7 @@ impl Hub {
                     tmux_session: Some(found.session.clone()),
                     spawned_by: Some("unknown".to_owned()),
                     started_at_unix: 0,
+                    machine_id: None,
                 });
             self.with(|s| {
                 s.inboxes.entry(node.id.clone()).or_default();
@@ -939,6 +978,66 @@ impl Hub {
             tracing::info!(adopted, "re-adopted spawned nodes from tmux");
         }
         self.persist();
+    }
+
+    fn rate_limit(&self, from: &str, to: &str) -> Result<(), String> {
+        self.with(|s| {
+            let window = s
+                .recent
+                .entry((from.to_owned(), to.to_owned()))
+                .or_default();
+            let now = Instant::now();
+            while window
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > RATE_WINDOW)
+            {
+                window.pop_front();
+            }
+            if window.len() >= RATE_LIMIT {
+                return Err(format!(
+                    "rate limited: `{from}` already sent `{to}` {RATE_LIMIT} messages in the last \
+                     {}s",
+                    RATE_WINDOW.as_secs()
+                ));
+            }
+            window.push_back(now);
+            Ok(())
+        })
+    }
+
+    fn touch_pair(&self, from: &str, to: &str) {
+        self.with(|s| {
+            let now = Instant::now();
+            for id in [from, to] {
+                if s.nodes.get(id).is_some_and(Node::is_managed) {
+                    s.last_active.insert(id.to_owned(), now);
+                }
+            }
+        });
+    }
+
+    async fn deliver_local(
+        &self,
+        to: &str,
+        target: &Node,
+        message: Message,
+    ) -> Result<serde_json::Value, String> {
+        if let Some(pane) = target.tmux_pane.as_deref() {
+            match tmux::paste(pane, &frame(&message)).await {
+                Ok(()) => return Ok(serde_json::json!({ "delivery": "pushed", "to": to })),
+                // The pane went away or tmux is unhappy; fall back to the inbox rather than lose
+                // the message.
+                Err(err) => tracing::warn!(%err, pane, "tmux delivery failed; queueing"),
+            }
+        }
+
+        self.with(|s| {
+            s.inboxes
+                .entry(to.to_owned())
+                .or_default()
+                .push_back(message);
+        });
+        Ok(serde_json::json!({ "delivery": "queued", "to": to }))
     }
 
     async fn send(
@@ -956,68 +1055,32 @@ impl Hub {
             ));
         }
         self.prune().await;
-        let (to, target) = self
-            .with(|s| {
-                let id = resolve(s, &to)?;
-                Ok::<_, String>(id.and_then(|id| Some((id.clone(), s.nodes.get(&id)?.clone()))))
-            })?
-            .ok_or_else(|| format!("no live node `{to}`; call list_nodes to see who is online"))?;
-        if from == to {
-            return Err("a node cannot message itself".to_owned());
+        let resolved = self.with(|s| resolve(s, &to))?;
+        if let Some(id) = resolved {
+            let target = self.with(|s| s.nodes.get(&id).cloned()).ok_or_else(|| {
+                format!("no live node `{to}`; call list_nodes to see who is online")
+            })?;
+            if from == id {
+                return Err("a node cannot message itself".to_owned());
+            }
+            self.rate_limit(&from, &id)?;
+            // Both ends are active: the recipient has work, and a node that is sending is clearly
+            // not idle even if nobody has written to it.
+            self.touch_pair(&from, &id);
+            let message = Message {
+                from,
+                text,
+                hops,
+                sent_at_unix: unix_now(),
+            };
+            return self.deliver_local(&id, &target, message).await;
         }
-
-        self.with(|s| {
-            let window = s.recent.entry((from.clone(), to.clone())).or_default();
-            let now = Instant::now();
-            while window
-                .front()
-                .is_some_and(|t| now.duration_since(*t) > RATE_WINDOW)
-            {
-                window.pop_front();
-            }
-            if window.len() >= RATE_LIMIT {
-                return Err(format!(
-                    "rate limited: `{from}` already sent `{to}` {RATE_LIMIT} messages in the last \
-                     {}s",
-                    RATE_WINDOW.as_secs()
-                ));
-            }
-            window.push_back(now);
-            Ok(())
-        })?;
-
-        let message = Message {
-            from,
-            text,
-            hops,
-            sent_at_unix: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        };
-
-        // Both ends are active: the recipient has work, and a node that is sending is clearly
-        // not idle even if nobody has written to it.
-        self.with(|s| {
-            let now = Instant::now();
-            for id in [&to, &message.from] {
-                if s.nodes.get(id).is_some_and(Node::is_managed) {
-                    s.last_active.insert(id.clone(), now);
-                }
-            }
-        });
-
-        if let Some(pane) = target.tmux_pane.as_deref() {
-            match tmux::paste(pane, &frame(&message)).await {
-                Ok(()) => return Ok(serde_json::json!({ "delivery": "pushed", "to": to })),
-                // The pane went away or tmux is unhappy; fall back to the inbox rather than lose
-                // the message.
-                Err(err) => tracing::warn!(%err, pane, "tmux delivery failed; queueing"),
-            }
+        if let Some(value) = relay_bridge::try_remote(self, &from, &to, &text, hops).await? {
+            return Ok(value);
         }
-
-        self.with(|s| s.inboxes.entry(to.clone()).or_default().push_back(message));
-        Ok(serde_json::json!({ "delivery": "queued", "to": to }))
+        Err(format!(
+            "no live node `{to}`; call list_nodes to see who is online"
+        ))
     }
 
     async fn spawn(
@@ -1091,6 +1154,7 @@ impl Hub {
             tmux_session: Some(spawned.session.clone()),
             spawned_by: Some(from.unwrap_or_else(|| "user".to_owned())),
             started_at_unix: unix_now(),
+            machine_id: None,
         };
         self.with(|s| {
             s.inboxes.entry(id.clone()).or_default();
@@ -1356,7 +1420,40 @@ async fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::relay_bridge::{self, Outbound, RemoteError, RemoteMesh};
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingRelay {
+        sent: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl RemoteMesh for RecordingRelay {
+        async fn send(&self, message: &Outbound) -> Result<mesh_pro::SendAck, RemoteError> {
+            self.sent.lock().unwrap().push(message.to_node.clone());
+            Ok(mesh_pro::SendAck {
+                to_machine: message
+                    .to_machine
+                    .clone()
+                    .unwrap_or_else(|| "m2".to_owned()),
+                to_node: message.to_node.clone(),
+            })
+        }
+
+        async fn register(&self, _nodes: &[mesh_pro::RegisteredNode]) -> Result<(), RemoteError> {
+            Ok(())
+        }
+
+        async fn poll(&self, _wait_ms: u64) -> Result<Vec<mesh_pro::RelayMessage>, RemoteError> {
+            Ok(Vec::new())
+        }
+
+        async fn peers(&self) -> Result<Vec<mesh_pro::PeerNode>, RemoteError> {
+            Ok(Vec::new())
+        }
+    }
 
     fn hub() -> Arc<Hub> {
         Hub::new(Arc::new(Config::default_agents()))
@@ -1374,6 +1471,7 @@ mod tests {
             tmux_session: None,
             spawned_by: None,
             started_at_unix: 0,
+            machine_id: None,
         }
     }
 
@@ -1509,8 +1607,95 @@ mod tests {
     async fn sending_to_an_unknown_node_names_the_fix() {
         let hub = hub();
         register(&hub, "a").await;
-        let err = hub.dispatch(send("a", "ghost", 0)).await.unwrap_err().message;
-        assert!(err.contains("list_nodes"), "got: {err}");
+        let err = hub
+            .dispatch(send("a", "ghost", 0))
+            .await
+            .unwrap_err()
+            .message;
+        assert_eq!(
+            err,
+            "no live node `ghost`; call list_nodes to see who is online"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_address_without_pro_points_at_the_upgrade() {
+        let hub = hub();
+        register(&hub, "a").await;
+        relay_bridge::force_free_for_test(&hub);
+        let err = hub
+            .dispatch(send("a", "remote:other:codex-1", 0))
+            .await
+            .unwrap_err()
+            .message;
+        assert_eq!(err, mesh_pro::upgrade_message());
+    }
+
+    #[tokio::test]
+    async fn a_pro_hub_forwards_to_the_relay_and_lists_the_peer() {
+        let hub = hub();
+        register(&hub, "a").await;
+        let record = Arc::new(RecordingRelay {
+            sent: Mutex::new(Vec::new()),
+        });
+        relay_bridge::install_for_test(
+            &hub,
+            record.clone(),
+            vec![mesh_pro::PeerNode {
+                machine_id: "m2".to_owned(),
+                id: "claude-9".to_owned(),
+                name: Some("remote-reviewer".to_owned()),
+                agent: "claude".to_owned(),
+            }],
+        );
+
+        let sent = hub
+            .dispatch(send("a", "remote:m2:claude-9", 0))
+            .await
+            .unwrap();
+        assert_eq!(sent["delivery"], "relay");
+        assert_eq!(sent["to"], "remote:m2:claude-9");
+
+        let by_name = hub.dispatch(send("a", "remote-reviewer", 0)).await.unwrap();
+        assert_eq!(by_name["to"], "remote:m2:claude-9");
+        assert_eq!(record.sent.lock().unwrap().len(), 2);
+
+        let listed: Vec<Node> =
+            serde_json::from_value(hub.dispatch(Request::List).await.unwrap()).unwrap();
+        assert!(listed.iter().any(|node| {
+            node.id == "remote:m2:claude-9" && node.machine_id.as_deref() == Some("m2")
+        }));
+    }
+
+    #[tokio::test]
+    async fn a_relay_message_lands_in_the_local_inbox() {
+        let hub = hub();
+        register(&hub, "b").await;
+        assert!(
+            relay_bridge::deliver(
+                &hub,
+                mesh_pro::RelayMessage {
+                    to_node: "b".to_owned(),
+                    from_machine: "m2".to_owned(),
+                    from_node: "claude-9".to_owned(),
+                    text: "hi".to_owned(),
+                    hops: 1,
+                    sent_at_unix: 5,
+                },
+            )
+            .await
+        );
+        let drained = hub
+            .dispatch(Request::Inbox {
+                node: Some("b".to_owned()),
+                pid: None,
+            })
+            .await
+            .unwrap();
+        let messages = drained.as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["from"], "remote:m2:claude-9");
+        assert_eq!(messages[0]["text"], "hi");
     }
 
     /// Names are only set by `spawn`, which needs tmux, so tests set them on the stored node.
@@ -1556,8 +1741,15 @@ mod tests {
         name(&hub, "b", "twin");
         name(&hub, "c", "twin");
 
-        let err = hub.dispatch(send("a", "twin", 0)).await.unwrap_err().message;
-        assert!(err.contains("more than one") && err.contains("b, c"), "got: {err}");
+        let err = hub
+            .dispatch(send("a", "twin", 0))
+            .await
+            .unwrap_err()
+            .message;
+        assert!(
+            err.contains("more than one") && err.contains("b, c"),
+            "got: {err}"
+        );
 
         let err = hub
             .dispatch(Request::Kill {
@@ -1592,7 +1784,11 @@ mod tests {
             serde_json::from_value(hub.dispatch(Request::List).await.unwrap()).unwrap();
         let by_id = |id: &str| listed.iter().find(|n| n.id == id).unwrap().name.clone();
         assert_eq!(by_id("a").as_deref(), Some("reviewer"));
-        assert_eq!(by_id("user-session"), None, "registration never names a node");
+        assert_eq!(
+            by_id("user-session"),
+            None,
+            "registration never names a node"
+        );
     }
 
     #[tokio::test]

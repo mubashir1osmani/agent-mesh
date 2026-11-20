@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::await_holding_lock)]
 //! Integration tests against the real `opencode acp` binary.
 //!
 //! These drive an actual agent process and a real (free) model, because the behaviour under test

@@ -34,7 +34,7 @@ macOS, one command (universal binary, Apple Silicon and Intel):
 brew install mubashir1osmani/agent-mesh/agent-mesh
 ```
 
-From source, which is the route on Linux; needs [Rust](https://rustup.rs) 1.85+ for edition 2024:
+From source, which is the route on Linux; needs [Rust](https://rustup.rs) 1.88+:
 
 ```bash
 git clone https://github.com/mubashir1osmani/agent-mesh.git
@@ -77,6 +77,7 @@ CLI afterwards; MCP servers are loaded at startup.
 ```toml
 [mcp_servers.agent-mesh]
 command = "agent-mesh"
+env_vars = ["TMUX", "TMUX_PANE"]
 ```
 
 These use the bare command name, resolved from `PATH`. Note that neither file expands shell

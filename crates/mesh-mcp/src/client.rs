@@ -45,6 +45,7 @@ impl Identity {
                 // user's own.
                 spawned_by: None,
                 started_at_unix: 0,
+                machine_id: None,
             }),
         }
     }
@@ -114,8 +115,14 @@ async fn exchange(stream: UnixStream, request: &Request) -> Result<serde_json::V
     BufReader::new(read).read_line(&mut line).await?;
     match serde_json::from_str::<Response>(&line)? {
         Response::Ok { data } => Ok(data),
-        Response::Error { message, internal: false } => Err(HubError::Refused(message)),
-        Response::Error { message, internal: true } => Err(HubError::Internal(message)),
+        Response::Error {
+            message,
+            internal: false,
+        } => Err(HubError::Refused(message)),
+        Response::Error {
+            message,
+            internal: true,
+        } => Err(HubError::Internal(message)),
     }
 }
 
@@ -158,7 +165,16 @@ fn start_hub() -> Result<(), HubError> {
     // Started from home so the hub's config (it is hub-wide now) never depends on which client's
     // working directory happened to launch it.
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    let exe = std::env::current_exe()?;
+    let mut command = if let Some(setsid) = crate::tmux::setsid_program() {
+        let mut command = std::process::Command::new(setsid);
+        command.arg(&exe);
+        command
+    } else {
+        let mut command = std::process::Command::new(&exe);
+        command.process_group(0);
+        command
+    };
     if let Some(home) = home {
         command.current_dir(home);
     }
@@ -169,7 +185,6 @@ fn start_hub() -> Result<(), HubError> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log)
-        .process_group(0)
         .spawn()?;
     Ok(())
 }
@@ -194,7 +209,13 @@ fn hub_path() -> std::ffi::OsString {
     .map(std::path::PathBuf::from)
     .collect();
     if let Some(home) = home {
-        for rel in [".local/bin", ".cargo/bin", ".claude/local", ".opencode/bin", ".grok/bin"] {
+        for rel in [
+            ".local/bin",
+            ".cargo/bin",
+            ".claude/local",
+            ".opencode/bin",
+            ".grok/bin",
+        ] {
             wanted.push(home.join(rel));
         }
     }

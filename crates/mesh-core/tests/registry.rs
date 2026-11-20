@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use mesh_core::registry::{ChainRejection, Route};
 use mesh_core::{AgentId, AskChain, SessionRegistry, SessionState, VendorSessionId};
 use std::path::PathBuf;

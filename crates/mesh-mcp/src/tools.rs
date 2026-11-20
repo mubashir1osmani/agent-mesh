@@ -7,9 +7,7 @@ use crate::client::{self, Identity};
 use crate::config::Config;
 use crate::hub::{HubError, Message, Node, Request};
 use crate::tmux;
-use mesh_core::{
-    AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId,
-};
+use mesh_core::{AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use serde::{Deserialize, Serialize};
@@ -674,6 +672,7 @@ fn to_mcp_error(err: crate::mesh::MeshError) -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::mesh::MeshError;
     use mesh_core::Turn;
@@ -771,6 +770,7 @@ mod tests {
 
 #[cfg(test)]
 mod schema_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     /// MCP requires every tool's `outputSchema` to have an object at its root. rmcp only discovers

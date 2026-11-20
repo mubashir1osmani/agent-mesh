@@ -81,13 +81,37 @@ pub fn command_line(agent: &str, program: &str, prompt: Option<&str>) -> Vec<Str
 /// `exec "$0" "$@"` hands the arguments over untouched: the shell sources its startup files and
 /// then replaces itself with the agent, never interpreting the prompt.
 pub fn through_login_shell(argv: Vec<String>) -> Vec<String> {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/zsh".to_owned());
-    let mut wrapped = vec![shell, "-lic".to_owned(), "exec \"$0\" \"$@\"".to_owned()];
+    let mut wrapped = vec![
+        login_shell(),
+        "-lic".to_owned(),
+        "exec \"$0\" \"$@\"".to_owned(),
+    ];
     wrapped.extend(argv);
     wrapped
+}
+
+pub fn login_shell() -> String {
+    login_shell_from(std::env::var("SHELL").ok(), |path| {
+        std::path::Path::new(path).is_file()
+    })
+}
+
+fn login_shell_from(explicit: Option<String>, exists: impl Fn(&str) -> bool) -> String {
+    if let Some(shell) = explicit.filter(|shell| !shell.is_empty() && exists(shell)) {
+        return shell;
+    }
+    for candidate in ["/bin/bash", "/usr/bin/bash", "/bin/sh", "/usr/bin/sh"] {
+        if exists(candidate) {
+            return candidate.to_owned();
+        }
+    }
+    "/bin/sh".to_owned()
+}
+
+pub fn setsid_program() -> Option<&'static str> {
+    ["/usr/bin/setsid", "/bin/setsid"]
+        .into_iter()
+        .find(|candidate| std::path::Path::new(candidate).is_file())
 }
 
 pub async fn spawn(launch: &Launch<'_>) -> Result<Spawned, TmuxError> {
@@ -192,7 +216,12 @@ pub struct Found {
 /// Every live `mesh-*` tmux session. An absent tmux server means none, not an error.
 pub async fn list_mesh_sessions() -> Result<Vec<Found>, TmuxError> {
     let out = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_id} #{pane_pid}"])
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name} #{pane_id} #{pane_pid}",
+        ])
         .output()
         .await?;
     if !out.status.success() {
@@ -277,6 +306,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unset_or_missing_shell_does_not_invent_zsh() {
+        assert_eq!(
+            login_shell_from(None, |path| path == "/bin/bash"),
+            "/bin/bash"
+        );
+        assert_eq!(
+            login_shell_from(Some(String::new()), |path| path == "/bin/sh"),
+            "/bin/sh"
+        );
+        assert_eq!(
+            login_shell_from(Some("/bin/zsh".to_owned()), |path| path == "/usr/bin/sh"),
+            "/usr/bin/sh"
+        );
+        assert_eq!(login_shell_from(None, |_| false), "/bin/sh");
+    }
+
+    #[test]
     fn login_shell_wrapper_passes_the_agent_argv_through_untouched() {
         let inner = command_line("claude", "claude", Some("two words; $HOME"));
         let wrapped = through_login_shell(inner.clone());
@@ -293,10 +339,9 @@ mod tests {
 
     #[test]
     fn agents_without_a_positional_prompt_get_their_flag() {
-        assert_eq!(
-            command_line("opencode", "opencode", Some("hi")),
-            vec!["opencode", "--prompt", "hi"]
-        );
+        assert_eq!(command_line("opencode", "opencode", Some("hi")), vec![
+            "opencode", "--prompt", "hi"
+        ]);
         let gemini = command_line("gemini", "gemini", Some("hi"));
         assert_eq!(&gemini[gemini.len() - 2..], ["-i", "hi"]);
     }
