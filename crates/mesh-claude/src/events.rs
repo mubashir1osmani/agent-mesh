@@ -201,8 +201,14 @@ mod tests {
         assert_eq!(
             transcript.turns,
             vec![
-                Turn { speaker: Speaker::User, text: "hello".to_owned() },
-                Turn { speaker: Speaker::Agent, text: "hi there".to_owned() },
+                Turn {
+                    speaker: Speaker::User,
+                    text: "hello".to_owned()
+                },
+                Turn {
+                    speaker: Speaker::Agent,
+                    text: "hi there".to_owned()
+                },
             ]
         );
     }
@@ -224,7 +230,10 @@ mod tests {
 
         assert_eq!(
             transcript.turns,
-            vec![Turn { speaker: Speaker::User, text: "keep me".to_owned() }],
+            vec![Turn {
+                speaker: Speaker::User,
+                text: "keep me".to_owned()
+            }],
             "tool-only and unparseable lines contribute nothing, prose survives"
         );
     }

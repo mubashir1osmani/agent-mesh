@@ -1,5 +1,3 @@
-//! HTTP routes. Handlers stay thin: decisions live in [`crate::state::Inner`].
-
 use crate::billing::{self, WEBHOOK_TOLERANCE_SECONDS};
 use crate::config::ServerConfig;
 use crate::state::{Inner, Plan, RouteError};
@@ -71,22 +69,15 @@ impl ApiError {
         }
     }
 
-    fn pro_required(upgrade_url: &str) -> Self {
-        let error = format!(
-            "cross-machine mesh is a Crewmesh Pro feature ($9/mo or $90/yr). Upgrade at {upgrade_url}"
-        );
-        Self {
-            status: StatusCode::FORBIDDEN,
-            body: serde_json::json!({ "error": error, "upgrade_url": upgrade_url }),
-        }
+    fn pro_required() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "cross-machine messaging needs a Pro account. Run `agent-mesh login`",
+        )
     }
 
     fn stub_disabled() -> Self {
-        Self::new(
-            StatusCode::NOT_FOUND,
-            "this route exists only in stub billing mode. CREWMESH_STRIPE_SECRET_KEY is set, so \
-             complete payment through Stripe and the webhook",
-        )
+        Self::new(StatusCode::NOT_FOUND, "not available")
     }
 }
 
@@ -135,22 +126,18 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn meta(State(app): State<App>) -> Json<Value> {
+async fn meta() -> Json<Value> {
     Json(serde_json::json!({
         "service": "crewmesh-relay",
-        "billing": app.config.billing_mode(),
-        "upgrade_url": app.config.upgrade_url,
     }))
 }
 
 async fn billing_success() -> Html<&'static str> {
-    Html(
-        "<p>Payment received. You can close this tab and return to <code>agent-mesh login</code>.</p>",
-    )
+    Html("<p>You can close this tab and return to <code>agent-mesh login</code>.</p>")
 }
 
 async fn billing_cancel() -> Html<&'static str> {
-    Html("<p>Checkout canceled. Crewmesh Pro was not enabled.</p>")
+    Html("<p>You can close this tab.</p>")
 }
 
 async fn device_start(State(app): State<App>) -> Result<Json<DeviceStart>, ApiError> {
@@ -208,34 +195,11 @@ struct CodeQuery {
     code: String,
 }
 
-async fn device_verify(State(app): State<App>, Query(query): Query<CodeQuery>) -> Html<String> {
-    let stub = app.config.stripe.is_none();
+async fn device_verify(Query(query): Query<CodeQuery>) -> Html<String> {
     let code = escape(&query.code);
-    let public = escape(app.config.public_url.trim_end_matches('/'));
-    let mode = if stub { "stub" } else { "stripe" };
-    let body = if stub {
-        format!(
-            "<p>Stub billing is on because <code>CREWMESH_STRIPE_SECRET_KEY</code> is unset. \
-             This does not charge a card.</p>\
-             <pre>curl -s -X POST {public}/v1/device/approve \\\n\
-             -H 'content-type: application/json' \\\n\
-             -d '{{\"user_code\":\"{code}\",\"plan\":\"pro\",\"email\":\"you@example.com\"}}'</pre>\
-             <p>Or walk the checkout seam: <code>POST /v1/checkout/session</code> with this \
-             device, then <code>POST /v1/checkout/stub/&lt;id&gt;/complete</code>.</p>"
-        )
-    } else {
-        format!(
-            "<p>Stripe billing is live. Create a checkout session for this code, pay, and the \
-             webhook will approve the login.</p>\
-             <pre>curl -s -X POST {public}/v1/checkout/session \\\n\
-             -H 'content-type: application/json' \\\n\
-             -d '{{\"device_code\":\"&lt;from agent-mesh login&gt;\",\"interval\":\"month\"}}'</pre>"
-        )
-    };
     Html(format!(
         "<!doctype html><meta charset=\"utf-8\"><title>Crewmesh</title>\
-         <h1>Crewmesh login</h1><p>Code: <strong>{code}</strong></p>\
-         <p>Billing mode: <strong>{mode}</strong></p>{body}"
+         <h1>Crewmesh login</h1><p>Code: <strong>{code}</strong></p>"
     ))
 }
 
@@ -327,12 +291,8 @@ async fn stub_page(
     let public = escape(app.config.public_url.trim_end_matches('/'));
     let id = escape(&id);
     Ok(Html(format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Crewmesh stub checkout</title>\
-         <h1>Stub checkout</h1>\
-         <p>No Stripe secret is configured, so this session does not charge a card. \
-         Completing it marks the account Pro. This route returns 404 once \
-         <code>CREWMESH_STRIPE_SECRET_KEY</code> is set.</p>\
-         <pre>curl -s -X POST {public}/v1/checkout/stub/{id}/complete</pre>"
+        "<!doctype html><meta charset=\"utf-8\"><title>Crewmesh</title>\
+         <p><a href=\"{public}/v1/checkout/stub/{id}/complete\">Continue</a></p>"
     )))
 }
 
@@ -368,9 +328,7 @@ async fn webhook(
         let header = headers
             .get("stripe-signature")
             .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                ApiError::new(StatusCode::BAD_REQUEST, "missing Stripe-Signature header")
-            })?;
+            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "missing signature"))?;
         if !billing::verify_stripe_signature(
             &stripe.webhook_secret,
             header,
@@ -380,13 +338,9 @@ async fn webhook(
         ) {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
-                "Stripe-Signature did not verify",
+                "signature did not verify",
             ));
         }
-    } else {
-        tracing::info!(
-            "accepted unsigned stripe webhook because CREWMESH_STRIPE_WEBHOOK_SECRET is unset (stub billing)"
-        );
     }
 
     let event: StripeEvent = serde_json::from_slice(&body)
@@ -594,7 +548,7 @@ fn require_pro(app: &App, headers: &HeaderMap) -> Result<Authed, ApiError> {
         .map(|account| (account.id.clone(), account.plan))
         .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "unknown token"))?;
     if account.1 != Plan::Pro {
-        return Err(ApiError::pro_required(&app.config.upgrade_url));
+        return Err(ApiError::pro_required());
     }
     Ok(Authed {
         account_id: account.0,

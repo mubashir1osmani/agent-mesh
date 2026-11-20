@@ -1,9 +1,3 @@
-//! Stripe Checkout and webhook signatures.
-//!
-//! The HTTP call is real when a secret key is configured. The signature check is the same one
-//! Stripe documents: HMAC-SHA256 over `{timestamp}.{payload}`, hex-encoded, compared in constant
-//! time. Stub mode never reaches this module's HTTP function.
-
 use crate::config::StripeConfig;
 use hmac::{Hmac, Mac};
 use mesh_pro::CheckoutSession;
@@ -14,7 +8,6 @@ type HmacSha256 = Hmac<Sha256>;
 
 pub const WEBHOOK_TOLERANCE_SECONDS: u64 = 300;
 
-/// Form fields for `POST /v1/checkout/sessions`. Public so a test can pin the contract.
 pub fn checkout_form(
     stripe: &StripeConfig,
     account_id: &str,
@@ -74,24 +67,24 @@ pub async fn create_stripe_session(
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|err| format!("stripe request failed: {err}"))?;
+        .map_err(|err| format!("upstream request failed: {err}"))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|err| format!("stripe response could not be read: {err}"))?;
+        .map_err(|err| format!("upstream response could not be read: {err}"))?;
     if !status.is_success() {
         return Err(format!(
-            "stripe returned {}: {}",
+            "upstream returned {}: {}",
             status.as_u16(),
             stripe_message(&text)
         ));
     }
     let parsed: StripeSession = serde_json::from_str(&text)
-        .map_err(|err| format!("stripe returned unexpected JSON: {err}"))?;
+        .map_err(|err| format!("upstream returned unexpected JSON: {err}"))?;
     let url = parsed
         .url
-        .ok_or_else(|| "stripe session did not include a url".to_owned())?;
+        .ok_or_else(|| "upstream session did not include a url".to_owned())?;
     Ok(CheckoutSession {
         id: parsed.id,
         url,
@@ -132,13 +125,11 @@ fn stripe_message(body: &str) -> String {
         })
 }
 
-/// `Stripe-Signature` header value for `payload` at `timestamp`.
 pub fn stripe_signature_header(secret: &str, timestamp: u64, payload: &[u8]) -> Option<String> {
     let digest = sign(secret, &timestamp.to_string(), payload)?;
     Some(format!("t={timestamp},v1={digest}"))
 }
 
-/// Stripe's documented scheme. `header` is the raw `Stripe-Signature` value.
 pub fn verify_stripe_signature(
     secret: &str,
     header: &str,

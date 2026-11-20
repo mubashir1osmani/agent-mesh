@@ -1,5 +1,3 @@
-//! The relay as another machine would see it: auth, delivery, and both billing seams.
-
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use mesh_pro::{DevicePoll, DeviceStart, RegisteredNode, RelayClient};
@@ -41,7 +39,6 @@ fn stub_config() -> ServerConfig {
         bind: "127.0.0.1:0".into(),
         public_url: "http://relay.test".into(),
         data_path: None,
-        upgrade_url: "https://crewmesh.dev/pro".into(),
         cache_ttl_seconds: 900,
         stripe: None,
     }
@@ -167,8 +164,8 @@ async fn a_free_token_is_rejected_by_the_relay_and_unknown_tokens_are_unauthoriz
         .unwrap();
     assert_eq!(denied.status(), 403);
     let body: Value = denied.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("Crewmesh Pro"));
-    assert_eq!(body["upgrade_url"], "https://crewmesh.dev/pro");
+    assert!(body["error"].as_str().unwrap().contains("Pro account"));
+    assert!(body["error"].as_str().unwrap().contains("agent-mesh login"));
 
     let missing = http
         .get(format!("{base}/v1/entitlement"))
@@ -496,7 +493,6 @@ async fn a_machine_that_stops_refreshing_drops_off_the_relay() {
 }
 
 async fn stripe_server() -> String {
-    // Unused stand-in so a mis-routed checkout would fail closed instead of calling Stripe.
     spawn_app(
         axum::Router::new()
             .route("/healthz", axum::routing::get(|| async { "ok" }))

@@ -130,10 +130,13 @@ impl ClaudeTransport {
             agent: self.launch.agent.clone(),
             detail: "claude stdin was not piped".to_owned(),
         })?;
-        let stdout = child.stdout.take().ok_or_else(|| TransportError::Protocol {
-            agent: self.launch.agent.clone(),
-            detail: "claude stdout was not piped".to_owned(),
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| TransportError::Protocol {
+                agent: self.launch.agent.clone(),
+                detail: "claude stdout was not piped".to_owned(),
+            })?;
 
         if let Some(stderr) = child.stderr.take() {
             let agent = self.launch.agent.clone();
@@ -229,16 +232,18 @@ impl AgentTransport for ClaudeTransport {
 
         {
             let mut stdin = session.stdin.lock().await;
-            stdin.write_all(&wire).await.map_err(|_| {
-                TransportError::ConnectionClosed {
+            stdin
+                .write_all(&wire)
+                .await
+                .map_err(|_| TransportError::ConnectionClosed {
                     agent: self.launch.agent.clone(),
-                }
-            })?;
-            stdin.flush().await.map_err(|_| {
-                TransportError::ConnectionClosed {
+                })?;
+            stdin
+                .flush()
+                .await
+                .map_err(|_| TransportError::ConnectionClosed {
                     agent: self.launch.agent.clone(),
-                }
-            })?;
+                })?;
         }
 
         let mut events = session.events.lock().await;
@@ -330,7 +335,8 @@ impl AgentTransport for ClaudeTransport {
     }
 
     async fn shutdown(&self) {
-        let drained: Vec<Arc<Session>> = self.sessions.lock().await.drain().map(|(_, s)| s).collect();
+        let drained: Vec<Arc<Session>> =
+            self.sessions.lock().await.drain().map(|(_, s)| s).collect();
         for session in drained {
             session.shutdown().await;
         }
@@ -355,18 +361,21 @@ fn finish(
         });
     }
 
-    let cost = envelope.total_cost_usd.map(events::usd_to_micros).map(|reported| {
-        // A cumulative total should only ever climb. If it dropped, the counter was reset rather
-        // than incremented, so treat the whole figure as this turn's cost instead of computing a
-        // meaningless negative delta.
-        let delta = if reported.0 >= billed.0 {
-            CostMicros(reported.0 - billed.0)
-        } else {
-            reported
-        };
-        *billed = reported;
-        delta
-    });
+    let cost = envelope
+        .total_cost_usd
+        .map(events::usd_to_micros)
+        .map(|reported| {
+            // A cumulative total should only ever climb. If it dropped, the counter was reset rather
+            // than incremented, so treat the whole figure as this turn's cost instead of computing a
+            // meaningless negative delta.
+            let delta = if reported.0 >= billed.0 {
+                CostMicros(reported.0 - billed.0)
+            } else {
+                reported
+            };
+            *billed = reported;
+            delta
+        });
 
     let input_tokens = envelope.usage.total_input();
     let output_tokens = envelope.usage.output_tokens;
@@ -503,10 +512,18 @@ mod tests {
         let agent = AgentId::new("claude");
         let mut billed = CostMicros(0);
 
-        let first = finish(envelope(0.36210625, Default::default()), &agent, &mut billed)
-            .expect("first turn");
-        let second = finish(envelope(0.40636275, Default::default()), &agent, &mut billed)
-            .expect("second turn");
+        let first = finish(
+            envelope(0.36210625, Default::default()),
+            &agent,
+            &mut billed,
+        )
+        .expect("first turn");
+        let second = finish(
+            envelope(0.40636275, Default::default()),
+            &agent,
+            &mut billed,
+        )
+        .expect("second turn");
 
         assert_eq!(first.cost, Some(CostMicros(362_106)));
         assert_eq!(
@@ -524,8 +541,12 @@ mod tests {
         let agent = AgentId::new("claude");
         let mut billed = CostMicros(406_363);
 
-        let reply =
-            finish(envelope(0.02908775, Default::default()), &agent, &mut billed).expect("resumed");
+        let reply = finish(
+            envelope(0.02908775, Default::default()),
+            &agent,
+            &mut billed,
+        )
+        .expect("resumed");
 
         assert_eq!(
             reply.cost,
@@ -545,8 +566,12 @@ mod tests {
             output_tokens: 3,
         };
 
-        let reply = finish(envelope(0.0, usage), &AgentId::new("claude"), &mut CostMicros(0))
-            .expect("ok");
+        let reply = finish(
+            envelope(0.0, usage),
+            &AgentId::new("claude"),
+            &mut CostMicros(0),
+        )
+        .expect("ok");
 
         assert_eq!(reply.usage.input_tokens, 57_863);
         assert_eq!(reply.usage.total_tokens, 57_866);

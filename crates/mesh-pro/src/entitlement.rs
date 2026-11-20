@@ -1,5 +1,3 @@
-//! Credentials on disk, and the cached answer to "is Pro enabled?".
-
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{DEFAULT_CACHE_TTL_SECONDS, Entitlement};
@@ -8,19 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Hosted API used when `AGENT_MESH_API_BASE` is unset and login did not record one.
 pub const DEFAULT_API_BASE: &str = "https://api.crewmesh.dev";
 
-/// Where the CLI points people who hit a Pro-only feature.
-pub const DEFAULT_UPGRADE_URL: &str = "https://crewmesh.dev/pro";
-
-/// How long a cached Pro answer may still be used when the API cannot be reached.
 pub const DEFAULT_GRACE_SECONDS: u64 = 86_400;
 
 const CREDENTIALS_FILE: &str = "credentials.json";
 const CACHE_FILE: &str = "entitlement.json";
 
-/// Token saved by `agent-mesh login`. The file is mode 0600.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Credentials {
     pub token: String,
@@ -42,7 +34,6 @@ struct Cache {
     valid_until_unix: u64,
 }
 
-/// What `agent-mesh status` prints. `offline` means the last refresh failed and this is the cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     pub logged_in: bool,
@@ -70,7 +61,6 @@ impl Status {
     }
 }
 
-/// Something that can answer `GET /v1/entitlement`. Tests substitute a script; the CLI uses HTTP.
 pub trait EntitlementApi: Send + Sync {
     fn fetch<'a>(
         &'a self,
@@ -91,18 +81,16 @@ impl EntitlementApi for ApiClient {
     }
 }
 
-/// Where credentials live, and the clock used to decide whether the cache is still fresh.
 pub struct Store {
     dir: PathBuf,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
     grace_seconds: u64,
     timeout: Duration,
-    /// When set, entitlement and relay calls use this base instead of the one saved at login.
+
     api_base_override: Option<String>,
 }
 
 impl Store {
-    /// The real per-user directory, honoring `AGENT_MESH_*` overrides.
     pub fn from_env() -> Self {
         let override_base = std::env::var("AGENT_MESH_API_BASE")
             .ok()
@@ -139,15 +127,12 @@ impl Store {
         &self.dir
     }
 
-    /// `None` when nobody has logged in, or the credentials file cannot be read.
-    /// Does not touch the network.
     pub fn load(&self) -> Option<Credentials> {
         let mut creds = self.read_credentials()?;
         creds.api_base = self.api_base(&creds);
         Some(creds)
     }
 
-    /// Whether Pro is enabled. Logged-out users return `false` before `api` is called.
     pub async fn is_pro(&self, api: &impl EntitlementApi) -> bool {
         let Some(creds) = self.load() else {
             return false;
@@ -157,7 +142,6 @@ impl Store {
             .is_some_and(|decision| decision.pro)
     }
 
-    /// Check the token and store it. A rejected token is not written.
     pub async fn login_with_token(
         &self,
         api: &impl EntitlementApi,
@@ -170,7 +154,6 @@ impl Store {
         Ok(ent)
     }
 
-    /// Record a session the device flow already approved. No extra network call.
     pub fn save_session(
         &self,
         api_base: &str,
@@ -248,7 +231,7 @@ impl Store {
                 }
                 Some(cache)
             }
-            // A revoked token must not keep Pro for the offline grace window.
+
             Err(AccountError::Unauthorized) => {
                 self.clear_cache();
                 None
@@ -388,7 +371,6 @@ fn status_from(creds: &Credentials, cache: &Cache, offline: bool) -> Status {
     }
 }
 
-/// `~/.config/agent-mesh`, or `$AGENT_MESH_CONFIG_DIR`, or `$XDG_CONFIG_HOME/agent-mesh`.
 pub fn config_dir() -> PathBuf {
     if let Some(explicit) = std::env::var_os("AGENT_MESH_CONFIG_DIR") {
         return PathBuf::from(explicit);
@@ -403,28 +385,14 @@ pub fn config_dir() -> PathBuf {
         .join("agent-mesh")
 }
 
-pub fn upgrade_url() -> String {
-    std::env::var("AGENT_MESH_UPGRADE_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_UPGRADE_URL.to_owned())
-}
-
 pub fn upgrade_message() -> String {
-    format!(
-        "cross-machine mesh is a Crewmesh Pro feature ($9/mo or $90/yr). \
-         Run `agent-mesh login`, then upgrade at {}",
-        upgrade_url()
-    )
+    "cross-machine messaging needs a Pro account. Run `agent-mesh login`.".to_owned()
 }
 
-/// Whether a readable credentials file exists. A stat and a parse, never a socket.
 pub fn logged_in() -> bool {
     Store::from_env().load().is_some()
 }
 
-/// Forget the token and the cached entitlement. Missing files are not an error.
 pub fn logout() -> Result<(), AccountError> {
     let dir = config_dir();
     for name in [CREDENTIALS_FILE, CACHE_FILE] {
@@ -437,11 +405,6 @@ pub fn logout() -> Result<(), AccountError> {
     Ok(())
 }
 
-/// The question the rest of the mesh asks.
-///
-/// Returns `false` before any HTTP client is built when nobody is logged in, and when the cached
-/// answer is still inside its expiry. A refresh that cannot reach the API falls back to a cached
-/// Pro answer for [`DEFAULT_GRACE_SECONDS`], then to `false`.
 pub async fn pro_enabled() -> bool {
     let store = Store::from_env();
     let Some(creds) = store.load() else {
@@ -615,7 +578,7 @@ mod tests {
         let tmp = Tmp::new();
         let (ticks, now) = clock(1_000);
         let store = store(&tmp.0, now, 10_000);
-        // `pop` takes the last element, so the refresh is at the front of this vec.
+
         let api = Script::new(vec![Ok(free_ent(50)), Ok(pro_ent(100))]);
 
         let ent = store
@@ -665,7 +628,6 @@ mod tests {
             .unwrap();
         assert_eq!(api.calls(), 1);
 
-        // valid_until is 1050. Past that, refresh fails, but checked_at 1000 is inside grace 100.
         ticks.store(1_080, Ordering::SeqCst);
         assert!(store.is_pro(&api).await);
         assert_eq!(api.calls(), 2);

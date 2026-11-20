@@ -1,5 +1,3 @@
-//! Small JSON client for the Crewmesh API. Nothing in here runs unless a caller asks.
-
 use crate::error::AccountError;
 use crate::protocol::{DevicePoll, DeviceStart, Entitlement};
 use serde::Serialize;

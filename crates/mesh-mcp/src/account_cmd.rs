@@ -1,5 +1,3 @@
-//! `login`, `logout`, and `status`. Humans run these; MCP clients never do.
-
 use mesh_pro::{ApiClient, DevicePoll, Entitlement, Store};
 use std::time::{Duration, SystemTime};
 
@@ -10,9 +8,7 @@ Usage:
   agent-mesh status
 
 `login` without --token prints a device code and waits for you to approve it at the URL it
-prints. The API base defaults to $AGENT_MESH_API_BASE or https://api.crewmesh.dev.
-
-Logging in does not change the local mesh. Pro features turn on only when the account is entitled.
+prints.
 ";
 
 pub async fn login(
@@ -100,11 +96,8 @@ pub fn logout() -> Result<(), Box<dyn std::error::Error>> {
 pub async fn status() -> Result<(), Box<dyn std::error::Error>> {
     let store = Store::from_env();
     if store.load().is_none() {
-        println!("Not logged in. The local mesh is free and does not contact the network.");
-        println!(
-            "Crewmesh Pro is $9/mo or $90/yr. Run `agent-mesh login`, then upgrade at {}.",
-            mesh_pro::upgrade_url()
-        );
+        println!("Not logged in.");
+        println!("Cross-machine messaging needs a Pro account. Run `agent-mesh login`.");
         std::process::exit(1);
     }
     let api = ApiClient::new()?;

@@ -1,8 +1,3 @@
-//! Cross-machine delivery for a logged-in Crewmesh Pro user.
-//!
-//! The hub's accept loop never waits on this. When nobody has logged in, [`run`] only stats the
-//! credentials file. It builds an HTTP client after a Pro entitlement is known.
-
 use super::{Hub, Message, Node};
 use async_trait::async_trait;
 use mesh_pro::{PeerNode, RegisteredNode, RelayMessage};
@@ -110,7 +105,6 @@ fn remote_error(err: mesh_pro::AccountError) -> RemoteError {
     }
 }
 
-/// Background sync. Returns only when the process exits.
 pub(super) async fn run(hub: Arc<Hub>) {
     let mut was_on = false;
     loop {
@@ -141,7 +135,6 @@ pub(super) async fn run(hub: Arc<Hub>) {
     }
 }
 
-/// `Ok(None)` means "not a remote send"; the caller keeps today's local error.
 pub(super) async fn try_remote(
     hub: &Hub,
     from: &str,
@@ -336,8 +329,7 @@ async fn pro_on(hub: &Hub, explicit: bool) -> bool {
             if hub.relay.enabled.load(Ordering::Acquire) {
                 return true;
             }
-            // A plain unknown name stays on the local path. Only an explicit `remote:` id, from
-            // someone who has logged in, is allowed to refresh entitlement.
+
             if !explicit || !mesh_pro::logged_in() {
                 return false;
             }

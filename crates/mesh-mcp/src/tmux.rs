@@ -75,7 +75,7 @@ pub fn command_line(agent: &str, program: &str, prompt: Option<&str>) -> Vec<Str
 }
 
 /// Run `argv` through the user's login shell, so the agent gets the same environment as one
-/// started from a terminal (API keys, nvm, PATH additions from the shell's startup files). The hub itself was
+/// started from a terminal (API keys, nvm, PATH additions from `.zshrc`). The hub itself was
 /// launched by whichever MCP client came first and carries only a bare environment.
 ///
 /// `exec "$0" "$@"` hands the arguments over untouched: the shell sources its startup files and
@@ -90,8 +90,6 @@ fn wrap_with_shell(shell: String, argv: Vec<String>) -> Vec<String> {
     wrapped
 }
 
-/// `$SHELL` when that binary exists, otherwise the first of bash and sh that does.
-/// An unset `SHELL` used to assume `/bin/zsh`, which is not installed on a stock Linux image.
 pub fn login_shell() -> String {
     login_shell_from(std::env::var("SHELL").ok(), |path| {
         std::path::Path::new(path).is_file()
@@ -110,7 +108,6 @@ fn login_shell_from(explicit: Option<String>, exists: impl Fn(&str) -> bool) -> 
     "/bin/sh".to_owned()
 }
 
-/// `setsid(1)`, when this OS ships it. macOS usually does not; Linux does.
 pub fn setsid_program() -> Option<&'static str> {
     ["/usr/bin/setsid", "/bin/setsid"]
         .into_iter()

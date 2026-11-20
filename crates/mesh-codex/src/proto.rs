@@ -41,7 +41,10 @@ pub struct ThreadBody {
 
 impl ThreadRead {
     fn turns(&self) -> &[ThreadTurn] {
-        self.thread.as_ref().map(|t| t.turns.as_slice()).unwrap_or(&[])
+        self.thread
+            .as_ref()
+            .map(|t| t.turns.as_slice())
+            .unwrap_or(&[])
     }
 }
 

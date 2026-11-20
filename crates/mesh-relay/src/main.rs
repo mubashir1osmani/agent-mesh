@@ -1,9 +1,3 @@
-//! `agent-mesh-relay` — the hosted side of Crewmesh Pro.
-//!
-//! With `CREWMESH_STRIPE_SECRET_KEY` unset this process runs in stub billing mode: checkout does
-//! not contact Stripe, and `POST /v1/stripe/webhook` accepts unsigned events. Set the Stripe
-//! variables before exposing it beyond localhost. See docs/pro.md.
-
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

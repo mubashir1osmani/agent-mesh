@@ -82,7 +82,7 @@ pub struct NodeList {
 pub struct SendResult {
     pub to: String,
     /// `pushed`: typed straight into the recipient's tmux pane. `queued`: waiting in its inbox
-    /// until it checks. `relay`: handed to the Crewmesh relay for a node on another machine.
+    /// until it checks.
     pub delivery: String,
 }
 
@@ -293,9 +293,8 @@ impl MeshServer {
         name = "list_nodes",
         description = "List the agent sessions running live on this machine right now (claude, \
                        codex, grok, ... in any terminal or tmux pane), including ones spawned \
-                       with spawn_node. On Crewmesh Pro, peers on your other machines are \
-                       included too; their id looks like `remote:<machine>:<node>`. Use a node's \
-                       `id`, or its `name` if it has one, with send_message. `you` is your own id."
+                       with spawn_node. Use a node's `id`, or its `name` if it has one, with \
+                       send_message. `you` is your own id."
     )]
     async fn list_nodes(&self) -> Result<Json<NodeList>, ErrorData> {
         let you = client::register(&self.identity).await.map_err(hub_error)?;

@@ -32,14 +32,22 @@ pub async fn ps() -> Outcome {
                 p.kind,
                 p.pid,
                 format!("{}M", p.rss_mib),
-                p.age_seconds.map(duration).unwrap_or_else(|| "-".to_owned()),
-                p.idle_seconds.map(duration).unwrap_or_else(|| "-".to_owned()),
+                p.age_seconds
+                    .map(duration)
+                    .unwrap_or_else(|| "-".to_owned()),
+                p.idle_seconds
+                    .map(duration)
+                    .unwrap_or_else(|| "-".to_owned()),
                 p.spawned_by.as_deref().unwrap_or("-"),
             );
         }
         let total: u64 = report.processes.iter().map(|p| p.rss_mib).sum();
         println!("\ntotal memory: {total}M");
-        if let Some(watch) = report.processes.iter().find_map(|p| p.tmux_session.as_deref()) {
+        if let Some(watch) = report
+            .processes
+            .iter()
+            .find_map(|p| p.tmux_session.as_deref())
+        {
             println!("watch a tmux node: tmux attach -t {watch}");
         }
     }

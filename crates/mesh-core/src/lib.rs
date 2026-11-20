@@ -25,7 +25,7 @@ static SPAWN_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLo
 
 /// Environment to give every agent process a transport starts, on top of the parent's. The hub
 /// sets this once to the user's login-shell environment, because it is launched by an MCP client
-/// with a bare one and agents need what the login shell exports (API keys, nvm, PATH additions).
+/// with a bare one and agents need what `.zshrc` exports (API keys, nvm, PATH additions).
 pub fn set_spawn_env(vars: Vec<(String, String)>) {
     let _ = SPAWN_ENV.set(vars);
 }

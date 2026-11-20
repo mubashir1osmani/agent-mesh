@@ -1,13 +1,7 @@
-//! JSON shapes shared by the Crewmesh client and the relay.
-//!
-//! Field names are the wire protocol. Adding a defaulted field is compatible; renaming one is not.
-
 use serde::{Deserialize, Serialize};
 
-/// How long a client should trust an entitlement it just fetched, unless the server says otherwise.
 pub const DEFAULT_CACHE_TTL_SECONDS: u64 = 900;
 
-/// What `GET /v1/entitlement` returns, and what a client caches.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Entitlement {
     pub plan: String,
@@ -24,7 +18,6 @@ fn default_ttl() -> u64 {
     DEFAULT_CACHE_TTL_SECONDS
 }
 
-/// `POST /v1/device/start`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeviceStart {
     pub device_code: String,
@@ -35,7 +28,6 @@ pub struct DeviceStart {
     pub account_id: String,
 }
 
-/// `POST /v1/device/token`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DevicePoll {
@@ -83,16 +75,14 @@ impl DevicePoll {
     }
 }
 
-/// `POST /v1/checkout/session`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckoutSession {
     pub id: String,
     pub url: String,
-    /// `true` when no Stripe secret is configured and the session is completed by the stub route.
+
     pub stub: bool,
 }
 
-/// One live node a machine publishes to the relay.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredNode {
     pub id: String,
@@ -101,14 +91,12 @@ pub struct RegisteredNode {
     pub agent: String,
 }
 
-/// `POST /v1/relay/register`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisterBody {
     pub machine_id: String,
     pub nodes: Vec<RegisteredNode>,
 }
 
-/// A node on somebody else's machine, as `GET /v1/relay/peers` lists it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PeerNode {
     pub machine_id: String,
@@ -118,14 +106,13 @@ pub struct PeerNode {
     pub agent: String,
 }
 
-/// `POST /v1/relay/send`. `from_machine` is filled in by the client from its own machine id.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SendBody {
     pub from_machine: String,
     pub from_node: String,
     pub text: String,
     pub hops: u32,
-    /// Set when the sender already resolved `remote:<machine>:<node>`.
+
     #[serde(default)]
     pub to_machine: Option<String>,
     pub to_node: String,
@@ -157,10 +144,6 @@ pub struct PeersResponse {
     pub peers: Vec<PeerNode>,
 }
 
-/// Id a local hub uses for a peer that lives on another machine.
-///
-/// The shape is `remote:<machine_id>:<node_id>`. Machine ids are hex without colons, so the first
-/// colon after the prefix splits the two.
 pub fn remote_target_id(machine_id: &str, node_id: &str) -> String {
     format!("remote:{machine_id}:{node_id}")
 }

@@ -139,10 +139,12 @@ fn build_tracer(
 }
 
 fn start_prometheus(listen: &str) -> Result<(), TelemetryError> {
-    let addr: SocketAddr = listen.parse().map_err(|source| TelemetryError::BadAddress {
-        value: listen.to_owned(),
-        source,
-    })?;
+    let addr: SocketAddr = listen
+        .parse()
+        .map_err(|source| TelemetryError::BadAddress {
+            value: listen.to_owned(),
+            source,
+        })?;
 
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .with_http_listener(addr)

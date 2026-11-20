@@ -1,8 +1,3 @@
-//! Accounts, device codes, and the per-account message queues.
-//!
-//! Presence (which machine currently has which nodes) is memory only. Accounts and checkout
-//! sessions are what [`crate::config::ServerConfig::data_path`] persists.
-
 use mesh_pro::{
     DevicePoll, DeviceStart, Entitlement, PeerNode, RegisteredNode, RelayMessage, SendAck,
 };
@@ -82,7 +77,6 @@ struct Target {
     node_id: String,
 }
 
-/// One `POST /v1/relay/send`, borrowed from the request for the duration of routing.
 pub struct Outgoing<'a> {
     pub account_id: &'a str,
     pub from_machine: &'a str,

@@ -1,5 +1,3 @@
-//! Client for the cross-machine relay. Constructing it does not open a connection.
-
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{
@@ -100,7 +98,6 @@ impl RelayClient {
     }
 }
 
-/// Encode the few characters a machine id might contain. Machine ids are hex, so this stays short.
 fn urlencoding_component(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {

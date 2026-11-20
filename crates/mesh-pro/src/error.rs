@@ -1,4 +1,3 @@
-/// Why a Crewmesh account or relay call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
     #[error("could not store Crewmesh credentials: {0}")]
@@ -7,10 +6,10 @@ pub enum AccountError {
     Decode(#[from] serde_json::Error),
     #[error("the Crewmesh API rejected the token")]
     Unauthorized,
-    /// The token is real, and the account is not Pro. The string is safe to show a user.
+
     #[error("{0}")]
     NotPro(String),
-    /// The relay has no peer under that name.
+
     #[error("{0}")]
     Unknown(String),
     #[error("Crewmesh API error ({status}): {body}")]

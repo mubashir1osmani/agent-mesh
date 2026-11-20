@@ -4,8 +4,8 @@
 //! agent-initiated request must still get a reply: ACP requests block the agent's turn, so an
 //! unanswered permission prompt hangs the prompt forever.
 
-use mesh_core::jsonrpc::{Connection, Inbound};
 use mesh_core::AgentId;
+use mesh_core::jsonrpc::{Connection, Inbound};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

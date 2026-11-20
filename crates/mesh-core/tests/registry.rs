@@ -53,10 +53,7 @@ fn detached_session_routes_to_reattach() {
 
     assert_eq!(
         reg.route(&s).unwrap(),
-        Route::ReattachThenPrompt {
-            vendor,
-            cwd: cwd()
-        }
+        Route::ReattachThenPrompt { vendor, cwd: cwd() }
     );
 }
 
@@ -130,7 +127,10 @@ fn find_by_vendor_matches_agent_and_id() {
 
     assert_eq!(reg.find_by_vendor(&agent(), &vendor).unwrap().session, s);
     // Same vendor id, different agent: must not match.
-    assert!(reg.find_by_vendor(&AgentId::new("codex"), &vendor).is_none());
+    assert!(
+        reg.find_by_vendor(&AgentId::new("codex"), &vendor)
+            .is_none()
+    );
 }
 
 // --- loop guard ---
@@ -199,7 +199,9 @@ fn ask_chain_allows_distinct_hops_and_tracks_depth() {
 /// Pushing must not mutate the parent chain; sibling asks from one session are independent.
 #[test]
 fn ask_chain_is_immutable_across_branches() {
-    let root = AskChain::root().push(&mesh_core::SessionRef::parse("a:1"), 8).unwrap();
+    let root = AskChain::root()
+        .push(&mesh_core::SessionRef::parse("a:1"), 8)
+        .unwrap();
 
     let left = root.push(&mesh_core::SessionRef::parse("b:2"), 8).unwrap();
     let right = root.push(&mesh_core::SessionRef::parse("c:3"), 8).unwrap();

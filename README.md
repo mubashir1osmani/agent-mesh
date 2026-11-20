@@ -77,8 +77,6 @@ CLI afterwards; MCP servers are loaded at startup.
 ```toml
 [mcp_servers.agent-mesh]
 command = "agent-mesh"
-# Codex strips the MCP server's environment. Without these, a message cannot be typed into a
-# Codex session that is already running in tmux.
 env_vars = ["TMUX", "TMUX_PANE"]
 ```
 
@@ -344,26 +342,6 @@ skip themselves when `opencode` isn't installed.
 - After upgrading, restart your agent CLIs and run `pkill -f "agent-mesh hub"`: an old client and a
   new hub (or the reverse) refuse to talk, by design
 - Codex reports usage per turn; other agents vary in what they report at all
-
-## Free and Pro
-
-Everything above stays free, under MIT, and on this machine. The hub does not contact the network
-unless you log in. Install and the day-to-day commands are unchanged.
-
-**Crewmesh Pro** ($9/month or $90/year) is the hosted half: agents on different machines message
-each other through a relay. Phone and Slack alerts, cloud session history, and a cost dashboard
-are the rest of that plan; this tree has the account, entitlement check, and relay they will sit
-on. A Team tier and a founding-member price are later. Details, environment variables, and what
-is stubbed versus wired to Stripe are in [docs/pro.md](docs/pro.md).
-
-| | Free | Pro |
-|---|---|---|
-| Local mesh, sessions, spawn, usage, `ps` / `kill` | yes | yes |
-| Cross-machine messaging | | yes |
-| Alerts, cloud session history, cost dashboard | | planned |
-
-`agent-mesh login`, `agent-mesh logout`, and `agent-mesh status` are the account commands. Without
-a login, `send_message` to a node on this machine behaves exactly as it does today.
 
 ## License
 

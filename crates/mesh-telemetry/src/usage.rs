@@ -154,7 +154,11 @@ mod tests {
         rec.record(&agent, &reply(100, 10, None));
 
         let usage = rec.get(&agent);
-        assert_eq!(usage.cost_usd(), None, "unreported cost must not read as $0");
+        assert_eq!(
+            usage.cost_usd(),
+            None,
+            "unreported cost must not read as $0"
+        );
         assert!(!usage.cost_is_complete());
     }
 
@@ -183,7 +187,11 @@ mod tests {
         rec.record(&agent, &reply(10, 1, None));
 
         let usage = rec.get(&agent);
-        assert_eq!(usage.cost_usd(), Some(0.005), "known spend is still reported");
+        assert_eq!(
+            usage.cost_usd(),
+            Some(0.005),
+            "known spend is still reported"
+        );
         assert!(
             !usage.cost_is_complete(),
             "but the caller must be able to tell it is not the whole bill"

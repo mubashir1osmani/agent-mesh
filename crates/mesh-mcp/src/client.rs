@@ -166,9 +166,6 @@ fn start_hub() -> Result<(), HubError> {
     // working directory happened to launch it.
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let exe = std::env::current_exe()?;
-    // A new session, not just a process group: on Linux `bash -lic` (how the hub reads the
-    // user's environment) stays attached to the caller's tty otherwise, and the hub never
-    // accepts a connection. macOS has no setsid(1); a new process group is the fallback.
     let mut command = if let Some(setsid) = crate::tmux::setsid_program() {
         let mut command = std::process::Command::new(setsid);
         command.arg(&exe);

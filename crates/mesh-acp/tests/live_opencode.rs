@@ -184,7 +184,10 @@ async fn attached_session_can_still_be_prompted() {
     second.attach(&vendor, &cwd).await.expect("session/load");
 
     let reply = second
-        .prompt(&vendor, "What word did I ask you to remember? One word only.")
+        .prompt(
+            &vendor,
+            "What word did I ask you to remember? One word only.",
+        )
         .await
         .expect("prompt after attach should work");
 

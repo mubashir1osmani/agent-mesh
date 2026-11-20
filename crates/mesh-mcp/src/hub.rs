@@ -63,8 +63,6 @@ pub struct Node {
     pub spawned_by: Option<String>,
     #[serde(default)]
     pub started_at_unix: u64,
-    /// Set when this node was learned from the Crewmesh relay rather than this machine.
-    /// The `id` is then `remote:<machine_id>:<node id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
 }
@@ -294,8 +292,6 @@ pub async fn serve(config: Arc<Config>) -> Result<(), HubError> {
     let hub = Hub::new(config);
     hub.recover().await;
 
-    // The login shell can sit on the caller's tty (`bash -lic` on Linux). Load it beside the
-    // accept loop so a stuck shell cannot stop the hub from answering.
     tokio::spawn(async {
         let login = login_env().await;
         let count = login.len();
@@ -385,8 +381,6 @@ async fn login_env() -> Vec<(String, String)> {
     const MARKER: &str = "\u{0}AGENT_MESH_ENV\u{0}";
     let shell = crate::tmux::login_shell();
     let script = "printf '\\0AGENT_MESH_ENV\\0'; env -0";
-    // setsid, when the system has it, drops the controlling terminal. Without that, an
-    // interactive login shell can wait on the tty instead of printing the environment.
     let mut command = if let Some(setsid) = crate::tmux::setsid_program() {
         let mut command = tokio::process::Command::new(setsid);
         command.arg(&shell);
@@ -1011,7 +1005,6 @@ impl Hub {
         })
     }
 
-    /// Both ends are active: the recipient has work, and a node that is sending is not idle.
     fn touch_pair(&self, from: &str, to: &str) {
         self.with(|s| {
             let now = Instant::now();
@@ -1071,6 +1064,8 @@ impl Hub {
                 return Err("a node cannot message itself".to_owned());
             }
             self.rate_limit(&from, &id)?;
+            // Both ends are active: the recipient has work, and a node that is sending is clearly
+            // not idle even if nobody has written to it.
             self.touch_pair(&from, &id);
             let message = Message {
                 from,
