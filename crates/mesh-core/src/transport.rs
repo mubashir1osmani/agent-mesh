@@ -43,11 +43,7 @@ pub trait AgentTransport: Send + Sync {
     async fn open(&self, cwd: &Path) -> Result<Opened, TransportError>;
 
     /// Reach an existing vendor session, returning any transcript the vendor replays.
-    async fn attach(
-        &self,
-        vendor: &VendorSessionId,
-        cwd: &Path,
-    ) -> Result<Attached, TransportError>;
+    async fn attach(&self, vendor: &VendorSessionId, cwd: &Path) -> Result<Attached, TransportError>;
 
     /// Send a prompt into a live session and wait for the agent to finish its turn.
     async fn prompt(&self, vendor: &VendorSessionId, text: &str) -> Result<Reply, TransportError>;

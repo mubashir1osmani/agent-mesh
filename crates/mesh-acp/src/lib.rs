@@ -147,7 +147,9 @@ impl AcpTransport {
                 value: SessionConfigValueId::new(model),
             },
         );
-        let _: serde_json::Value = conn.request("session/set_config_option", &request).await?;
+        let _: serde_json::Value = conn
+            .request("session/set_config_option", &request)
+            .await?;
         Ok(())
     }
 }
@@ -174,7 +176,8 @@ impl AgentTransport for AcpTransport {
         // notifications that arrive ahead of the response, so a late subscriber sees nothing.
         let mut updates = conn.subscribe().await;
 
-        let request = LoadSessionRequest::new(SessionId::new(vendor.as_str()), cwd.to_path_buf());
+        let request =
+            LoadSessionRequest::new(SessionId::new(vendor.as_str()), cwd.to_path_buf());
         let _: LoadSessionResponse = conn.request("session/load", &request).await?;
 
         let mut turns: Vec<Turn> = Vec::new();
@@ -256,13 +259,8 @@ impl AgentTransport for AcpTransport {
     }
 
     async fn processes(&self) -> Vec<Process> {
-        let conns: Vec<Arc<Connection>> = self
-            .connections
-            .lock()
-            .await
-            .iter()
-            .map(|(_, c)| Arc::clone(c))
-            .collect();
+        let conns: Vec<Arc<Connection>> =
+            self.connections.lock().await.iter().map(|(_, c)| Arc::clone(c)).collect();
         let mut out = Vec::new();
         for conn in conns {
             if let Some(pid) = conn.pid().await {
@@ -289,22 +287,12 @@ impl AgentTransport for AcpTransport {
 
     /// One process per working directory.
     async fn would_spawn(&self, cwd: &Path) -> bool {
-        !self
-            .connections
-            .lock()
-            .await
-            .iter()
-            .any(|(root, _)| root == cwd)
+        !self.connections.lock().await.iter().any(|(root, _)| root == cwd)
     }
 
     async fn shutdown(&self) {
-        let drained: Vec<Arc<Connection>> = self
-            .connections
-            .lock()
-            .await
-            .drain(..)
-            .map(|(_, c)| c)
-            .collect();
+        let drained: Vec<Arc<Connection>> =
+            self.connections.lock().await.drain(..).map(|(_, c)| c).collect();
         for conn in drained {
             conn.shutdown().await;
         }

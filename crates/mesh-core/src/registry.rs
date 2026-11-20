@@ -14,10 +14,7 @@ pub enum Route {
     /// Vendor session exists and a connection is attached; prompt directly.
     PromptDirect { vendor: VendorSessionId },
     /// Vendor session exists but nothing is attached; load/resume first, then prompt.
-    ReattachThenPrompt {
-        vendor: VendorSessionId,
-        cwd: PathBuf,
-    },
+    ReattachThenPrompt { vendor: VendorSessionId, cwd: PathBuf },
 }
 
 /// Tracks the mapping from mesh-side `SessionRef` to vendor session state.
@@ -122,11 +119,7 @@ impl SessionRegistry {
 
     /// Look up a mesh session by the vendor's own id, so an agent can be handed a raw
     /// vendor id and still land on the existing mesh entry rather than duplicating it.
-    pub fn find_by_vendor(
-        &self,
-        agent: &AgentId,
-        vendor: &VendorSessionId,
-    ) -> Option<SessionEntry> {
+    pub fn find_by_vendor(&self, agent: &AgentId, vendor: &VendorSessionId) -> Option<SessionEntry> {
         self.read(|m| {
             m.values()
                 .find(|e| &e.agent == agent && e.state.vendor() == Some(vendor))

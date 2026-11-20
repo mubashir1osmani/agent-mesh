@@ -80,13 +80,10 @@ impl Connection {
             agent: agent.clone(),
             detail: "child stdin was not piped".to_owned(),
         })?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| TransportError::Protocol {
-                agent: agent.clone(),
-                detail: "child stdout was not piped".to_owned(),
-            })?;
+        let stdout = child.stdout.take().ok_or_else(|| TransportError::Protocol {
+            agent: agent.clone(),
+            detail: "child stdout was not piped".to_owned(),
+        })?;
 
         // Drain stderr so a chatty agent cannot fill its pipe buffer and deadlock.
         if let Some(stderr) = child.stderr.take() {
@@ -149,10 +146,7 @@ impl Connection {
         if let Some(method) = msg.get("method").and_then(serde_json::Value::as_str) {
             let inbound = Inbound {
                 method: method.to_owned(),
-                params: msg
-                    .get("params")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
+                params: msg.get("params").cloned().unwrap_or(serde_json::Value::Null),
                 id: msg.get("id").cloned(),
             };
             let subs = subscribers.read().await;
@@ -165,20 +159,14 @@ impl Connection {
         if let Some(id) = msg.get("id").and_then(serde_json::Value::as_i64) {
             let outcome = match msg.get("error") {
                 Some(err) => Err(RpcFailure {
-                    code: err
-                        .get("code")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(-1),
+                    code: err.get("code").and_then(serde_json::Value::as_i64).unwrap_or(-1),
                     message: err
                         .get("message")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("unknown error")
                         .to_owned(),
                 }),
-                None => Ok(msg
-                    .get("result")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null)),
+                None => Ok(msg.get("result").cloned().unwrap_or(serde_json::Value::Null)),
             };
             if let Some(tx) = pending.lock().await.remove(&id) {
                 let _ = tx.send(outcome);

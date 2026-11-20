@@ -13,8 +13,8 @@ use mesh_core::{
 use mesh_telemetry::{AskOutcome, UsageRecorder};
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, thiserror::Error)]
 pub enum MeshError {
     #[error("unknown agent `{requested}`; available: {available}")]
-    UnknownAgent {
-        requested: String,
-        available: String,
-    },
+    UnknownAgent { requested: String, available: String },
 
     #[error("refusing to route this ask: {reason}")]
     AskRefused { reason: String },
@@ -49,8 +46,7 @@ pub enum MeshError {
 
 /// Decides whether a new agent process may start. Returns the refusal message when it may not.
 /// The hub supplies one that counts every process it owns; without one, nothing is capped.
-pub type Admission =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
+pub type Admission = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
 
 impl MeshError {
     /// True when the caller can fix this by asking differently (bad argument, refused loop, cap
@@ -214,8 +210,11 @@ impl Mesh {
     }
 
     pub fn agents(&self) -> impl Iterator<Item = (&AgentId, Capabilities)> {
-        self.transports.iter().map(|(id, t)| (id, t.capabilities()))
+        self.transports
+            .iter()
+            .map(|(id, t)| (id, t.capabilities()))
     }
+
 
     fn transport(&self, agent: &AgentId) -> Result<Arc<dyn AgentTransport>, MeshError> {
         self.transports
@@ -261,10 +260,7 @@ impl Mesh {
         };
 
         let attached = self
-            .admitted(
-                transport.would_spawn(&cwd).await,
-                transport.attach(vendor, &cwd),
-            )
+            .admitted(transport.would_spawn(&cwd).await, transport.attach(vendor, &cwd))
             .await?;
         self.registry.mark_live(&session, attached.vendor)?;
         Ok((session, attached.replayed))
@@ -324,19 +320,14 @@ impl Mesh {
         // vendor session exists yet and whether anything is attached to it.
         let vendor = match self.registry.route(session)? {
             Route::Create { cwd } => {
-                let opened = self
-                    .admitted(transport.would_spawn(&cwd).await, transport.open(&cwd))
-                    .await?;
+                let opened = self.admitted(transport.would_spawn(&cwd).await, transport.open(&cwd)).await?;
                 self.registry.mark_live(session, opened.vendor.clone())?;
                 opened.vendor
             }
             Route::PromptDirect { vendor } => vendor,
             Route::ReattachThenPrompt { vendor, cwd } => {
                 let attached = self
-                    .admitted(
-                        transport.would_spawn(&cwd).await,
-                        transport.attach(&vendor, &cwd),
-                    )
+                    .admitted(transport.would_spawn(&cwd).await, transport.attach(&vendor, &cwd))
                     .await?;
                 self.registry.mark_live(session, attached.vendor.clone())?;
                 attached.vendor
@@ -413,13 +404,11 @@ fn build_transport(agent: &AgentId, cfg: &AgentConfig) -> Arc<dyn AgentTransport
             args: args.clone(),
             model: model.clone(),
         })),
-        AgentConfig::Claude { command, model, .. } => {
-            Arc::new(ClaudeTransport::new(ClaudeLaunch {
-                agent: agent.clone(),
-                program: command.clone(),
-                model: model.clone(),
-            }))
-        }
+        AgentConfig::Claude { command, model, .. } => Arc::new(ClaudeTransport::new(ClaudeLaunch {
+            agent: agent.clone(),
+            program: command.clone(),
+            model: model.clone(),
+        })),
         AgentConfig::Codex { command, .. } => {
             Arc::new(CodexTransport::new(agent.clone(), command.clone()))
         }
@@ -492,10 +481,7 @@ mod tests {
             .open_session(&AgentId::new("codex"), Path::new("."))
             .expect("cwd `.` exists so it resolves");
 
-        let entry = mesh
-            .sessions(None)
-            .into_iter()
-            .find(|e| e.session == session);
+        let entry = mesh.sessions(None).into_iter().find(|e| e.session == session);
         assert!(
             entry.expect("registered").cwd.is_absolute(),
             "stored cwd must be absolute"
@@ -622,7 +608,10 @@ mod tests {
     #[test]
     fn capabilities_reflect_which_agents_report_cost() {
         let mesh = mesh();
-        let caps: BTreeMap<_, _> = mesh.agents().map(|(id, c)| (id.to_string(), c)).collect();
+        let caps: BTreeMap<_, _> = mesh
+            .agents()
+            .map(|(id, c)| (id.to_string(), c))
+            .collect();
 
         // Only claude reports spend among the wired agents.
         assert!(caps["claude"].reports_cost);

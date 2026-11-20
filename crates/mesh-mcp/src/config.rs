@@ -99,18 +99,18 @@ fn codex_command() -> String {
 impl AgentConfig {
     pub fn enabled(&self) -> bool {
         match self {
-            Self::Acp { enabled, .. }
-            | Self::Claude { enabled, .. }
-            | Self::Codex { enabled, .. } => *enabled,
+            Self::Acp { enabled, .. } | Self::Claude { enabled, .. } | Self::Codex { enabled, .. } => {
+                *enabled
+            }
         }
     }
 
     /// The executable this agent needs on PATH.
     pub fn command(&self) -> &str {
         match self {
-            Self::Acp { command, .. }
-            | Self::Claude { command, .. }
-            | Self::Codex { command, .. } => command,
+            Self::Acp { command, .. } | Self::Claude { command, .. } | Self::Codex { command, .. } => {
+                command
+            }
         }
     }
 }
@@ -282,10 +282,7 @@ mod tests {
         let cfg = Config::load(&path).expect("loads");
 
         assert_eq!(cfg.max_processes, 8);
-        assert!(
-            cfg.agents.contains_key("codex"),
-            "built-in agents must remain"
-        );
+        assert!(cfg.agents.contains_key("codex"), "built-in agents must remain");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

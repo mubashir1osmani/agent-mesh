@@ -298,14 +298,8 @@ mod tests {
         assert_eq!(
             transcript.turns,
             vec![
-                Turn {
-                    speaker: Speaker::User,
-                    text: "hello".to_owned()
-                },
-                Turn {
-                    speaker: Speaker::Agent,
-                    text: "hi there".to_owned()
-                },
+                Turn { speaker: Speaker::User, text: "hello".to_owned() },
+                Turn { speaker: Speaker::Agent, text: "hi there".to_owned() },
             ],
             "only conversation items belong in the transcript"
         );
@@ -373,10 +367,7 @@ mod tests {
 
     #[test]
     fn classifies_agent_message_delta() {
-        let e = event(
-            "item/agentMessage/delta",
-            serde_json::json!({ "delta": "MAN" }),
-        );
+        let e = event("item/agentMessage/delta", serde_json::json!({ "delta": "MAN" }));
         assert!(matches!(classify(&e), Event::AgentText(t) if t == "MAN"));
     }
 
