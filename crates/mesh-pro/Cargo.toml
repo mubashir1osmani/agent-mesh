@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Crewmesh Pro accounts, entitlement cache, and relay client"
+description = "Account and relay client for agent-mesh"
 
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -13,6 +13,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["json"] }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

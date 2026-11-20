@@ -1,8 +1,8 @@
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{
-    PeerNode, PeersResponse, PollResponse, RegisterBody, RegisteredNode, RelayMessage, SendAck,
-    SendBody,
+    PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody, RegisteredNode, RelayMessage,
+    SendAck, SendBody,
 };
 use std::time::Duration;
 
@@ -69,10 +69,10 @@ impl RelayClient {
 
     pub async fn poll(&self, wait_ms: u64) -> Result<Vec<RelayMessage>, AccountError> {
         let url = format!("{}/v1/relay/poll", self.api_base);
-        let body = serde_json::json!({
-            "machine_id": self.machine_id,
-            "wait_ms": wait_ms,
-        });
+        let body = PollBody {
+            machine_id: self.machine_id.clone(),
+            wait_ms,
+        };
         let timeout =
             Duration::from_millis(wait_ms.saturating_add(5_000)).max(Duration::from_secs(10));
         let raw = self

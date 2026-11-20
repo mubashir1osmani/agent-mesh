@@ -8,7 +8,6 @@ members = [
     "crates/mesh-telemetry",
     "crates/mesh-mcp",
     "crates/mesh-pro",
-    "crates/mesh-relay",
 ]
 
 [workspace.package]

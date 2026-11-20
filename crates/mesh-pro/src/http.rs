@@ -1,5 +1,5 @@
 use crate::error::AccountError;
-use crate::protocol::{DevicePoll, DeviceStart, Entitlement};
+use crate::protocol::{DevicePoll, DeviceStart, DeviceTokenBody, Entitlement};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -65,7 +65,9 @@ impl ApiClient {
                 reqwest::Method::POST,
                 &url,
                 None,
-                Some(&serde_json::json!({ "device_code": device_code })),
+                Some(&DeviceTokenBody {
+                    device_code: device_code.to_owned(),
+                }),
                 Duration::from_secs(15),
             )
             .await?;

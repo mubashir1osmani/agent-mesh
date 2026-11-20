@@ -76,11 +76,8 @@ impl DevicePoll {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CheckoutSession {
-    pub id: String,
-    pub url: String,
-
-    pub stub: bool,
+pub struct DeviceTokenBody {
+    pub device_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,6 +129,13 @@ pub struct RelayMessage {
     pub text: String,
     pub hops: u32,
     pub sent_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollBody {
+    pub machine_id: String,
+    #[serde(default)]
+    pub wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
