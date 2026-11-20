@@ -7,9 +7,7 @@ use crate::client::{self, Identity};
 use crate::config::Config;
 use crate::hub::{HubError, Message, Node, Request};
 use crate::tmux;
-use mesh_core::{
-    AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId,
-};
+use mesh_core::{AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{ErrorData, tool, tool_router};
 use serde::{Deserialize, Serialize};
@@ -84,7 +82,7 @@ pub struct NodeList {
 pub struct SendResult {
     pub to: String,
     /// `pushed`: typed straight into the recipient's tmux pane. `queued`: waiting in its inbox
-    /// until it checks.
+    /// until it checks. `relay`: handed to the Crewmesh relay for a node on another machine.
     pub delivery: String,
 }
 
@@ -295,8 +293,9 @@ impl MeshServer {
         name = "list_nodes",
         description = "List the agent sessions running live on this machine right now (claude, \
                        codex, grok, ... in any terminal or tmux pane), including ones spawned \
-                       with spawn_node. Use a node's `id`, or its `name` if it has one, with \
-                       send_message. `you` is your own id."
+                       with spawn_node. On Crewmesh Pro, peers on your other machines are \
+                       included too; their id looks like `remote:<machine>:<node>`. Use a node's \
+                       `id`, or its `name` if it has one, with send_message. `you` is your own id."
     )]
     async fn list_nodes(&self) -> Result<Json<NodeList>, ErrorData> {
         let you = client::register(&self.identity).await.map_err(hub_error)?;
@@ -674,6 +673,7 @@ fn to_mcp_error(err: crate::mesh::MeshError) -> ErrorData {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::mesh::MeshError;
     use mesh_core::Turn;
@@ -771,6 +771,7 @@ mod tests {
 
 #[cfg(test)]
 mod schema_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     /// MCP requires every tool's `outputSchema` to have an object at its root. rmcp only discovers

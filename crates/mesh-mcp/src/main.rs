@@ -1,5 +1,6 @@
 //! agent-mesh: an MCP server that lets coding agents talk to each other's sessions.
 
+mod account_cmd;
 mod client;
 mod config;
 mod hook;
@@ -27,6 +28,10 @@ Usage:
   agent-mesh kill --all      Stop every agent process the mesh spawned
   agent-mesh hook <event>    Claude Code hook: deliver queued mesh messages
                              (<event> is user-prompt-submit or stop)
+  agent-mesh login           Log in to Crewmesh (--token, or a device code)
+  agent-mesh logout          Forget the saved Crewmesh token
+  agent-mesh status          Show the account and whether Pro is enabled
+                             (`whoami` is an alias)
   agent-mesh --version       Print the version and exit
   agent-mesh --help          Print this message and exit
 
@@ -51,6 +56,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 hook::run(args.next().as_deref().unwrap_or_default()).await;
                 return Ok(());
             }
+            "login" => return account_cmd::login(args).await,
+            "logout" => return account_cmd::logout(),
+            "status" | "whoami" => return account_cmd::status().await,
             "--version" | "-V" => println!("agent-mesh {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print!("{USAGE}"),
             other => {
@@ -85,7 +93,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Capabilities are static, so they come from a local, process-free Mesh; every session and
     // process lives in the hub.
-    let agents = Mesh::from_config(&config).agents().map(|(a, c)| (a.clone(), c)).collect();
+    let agents = Mesh::from_config(&config)
+        .agents()
+        .map(|(a, c)| (a.clone(), c))
+        .collect();
     let server = MeshServer::new(agents, config, identity);
 
     let service = server.serve(rmcp::transport::stdio()).await?;
