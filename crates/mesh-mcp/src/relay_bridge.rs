@@ -276,10 +276,10 @@ fn ensure(hub: &Hub) -> Result<Arc<dyn RemoteMesh>, String> {
         .load()
         .ok_or_else(|| "not logged in".to_owned())?;
     let mut slot = lock(&hub.relay.slot);
-    if let Some(existing) = slot.as_ref() {
-        if existing.token == creds.token {
-            return Ok(Arc::clone(&existing.remote));
-        }
+    if let Some(existing) = slot.as_ref()
+        && existing.token == creds.token
+    {
+        return Ok(Arc::clone(&existing.remote));
     }
     let machine = machine_id()?;
     let client = mesh_pro::RelayClient::new(&creds.api_base, &creds.token, machine)
