@@ -1,7 +1,9 @@
 use super::{Hub, Message, Node};
+use mesh_core::AgentTransport;
 use async_trait::async_trait;
 use mesh_pro::{PeerNode, RegisteredNode, RelayMessage};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,6 +18,7 @@ pub(super) struct RelayHandle {
     slot: Mutex<Option<Slot>>,
     peers: Mutex<Vec<PeerNode>>,
     surfaced: Mutex<HashSet<String>>,
+    wake_budget: Mutex<crate::wake::Budget>,
 }
 
 struct Slot {
@@ -24,13 +27,14 @@ struct Slot {
 }
 
 impl RelayHandle {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(wake_limit: u64) -> Self {
         Self {
             mode: AtomicU8::new(AUTO),
             enabled: AtomicBool::new(false),
             slot: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
             surfaced: Mutex::new(HashSet::new()),
+            wake_budget: Mutex::new(crate::wake::Budget::new(wake_limit)),
         }
     }
 }
@@ -65,6 +69,8 @@ pub(crate) trait RemoteMesh: Send + Sync {
     async fn poll(&self, wait_ms: u64) -> Result<Vec<RelayMessage>, RemoteError>;
     async fn peers(&self) -> Result<Vec<PeerNode>, RemoteError>;
     async fn ack(&self, ids: &[String]) -> Result<(), RemoteError>;
+    async fn surface(&self, ids: &[String]) -> Result<(), RemoteError>;
+    async fn allowlist(&self) -> Result<Vec<String>, RemoteError>;
 }
 
 struct LiveRemote {
@@ -113,6 +119,14 @@ impl RemoteMesh for LiveRemote {
 
     async fn ack(&self, ids: &[String]) -> Result<(), RemoteError> {
         self.client.ack(ids).await.map_err(remote_error)
+    }
+
+    async fn surface(&self, ids: &[String]) -> Result<(), RemoteError> {
+        self.client.surface(ids).await.map_err(remote_error)
+    }
+
+    async fn allowlist(&self) -> Result<Vec<String>, RemoteError> {
+        self.client.allowlist().await.map_err(remote_error)
     }
 }
 
@@ -237,7 +251,14 @@ pub(super) fn remote_nodes(hub: &Hub) -> Vec<Node> {
         .collect()
 }
 
-pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> bool {
+pub(super) struct Handed {
+    pub pushed: bool,
+    pub agent: String,
+    pub session: Option<String>,
+    pub cwd: String,
+}
+
+pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> Option<Handed> {
     let Some(target) = hub.with(|state| {
         let locals: Vec<Node> = state
             .nodes
@@ -265,7 +286,13 @@ pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> bool {
             })
     }) else {
         tracing::info!(node = %message.to_node, "relay message has no local node yet");
-        return false;
+        return None;
+    };
+    let handed = Handed {
+        pushed: target.tmux_pane.is_some(),
+        agent: target.agent.clone(),
+        session: session_of(&target),
+        cwd: target.cwd.clone(),
     };
     let local = Message {
         from: mesh_pro::remote_target_id(&message.from_machine, &message.from_node),
@@ -274,7 +301,18 @@ pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> bool {
         sent_at_unix: message.sent_at_unix,
     };
     let to = target.id.clone();
-    hub.deliver_local(&to, &target, local).await.is_ok()
+    if hub.deliver_local(&to, &target, local).await.is_err() {
+        return None;
+    }
+    Some(handed)
+}
+
+fn session_of(node: &Node) -> Option<String> {
+    if node.name.as_deref() == Some(node.id.as_str()) {
+        None
+    } else {
+        Some(node.id.clone())
+    }
 }
 
 #[cfg(test)]
@@ -303,14 +341,31 @@ async fn sync(hub: &Hub) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     let peers = remote.peers().await.map_err(|err| err.to_string())?;
     *lock(&hub.relay.peers) = peers;
+    let allowed = remote.allowlist().await.unwrap_or_default();
     let mut acked = Vec::new();
     for message in remote.poll(2_000).await.map_err(|err| err.to_string())? {
         let id = message.id.clone();
-        if !id.is_empty() && lock(&hub.relay.surfaced).contains(&id) {
+        if id.is_empty() {
+            let _ = deliver(hub, message).await;
+            continue;
+        }
+        if lock(&hub.relay.surfaced).contains(&id) {
             acked.push(id);
             continue;
         }
-        if deliver(hub, message).await && !id.is_empty() {
+        let Some(handed) = deliver(hub, message.clone()).await else {
+            continue;
+        };
+        let shown = if handed.pushed {
+            true
+        } else {
+            wake_idle(hub, &handed, &message, &allowed).await
+        };
+        if shown {
+            remote
+                .surface(std::slice::from_ref(&id))
+                .await
+                .map_err(|err| err.to_string())?;
             lock(&hub.relay.surfaced).insert(id.clone());
             acked.push(id);
         }
@@ -319,6 +374,54 @@ async fn sync(hub: &Hub) -> Result<(), String> {
         remote.ack(&acked).await.map_err(|err| err.to_string())?;
     }
     Ok(())
+}
+
+async fn wake_idle(hub: &Hub, handed: &Handed, message: &RelayMessage, allowed: &[String]) -> bool {
+    let Some(wake) = crate::wake::plan(
+        &handed.agent,
+        handed.session.as_deref(),
+        &message.text,
+        message.from_email.as_deref(),
+        allowed,
+        true,
+        true,
+    ) else {
+        return false;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    if !lock(&hub.relay.wake_budget).allow(now) {
+        return false;
+    }
+    run_wake(wake, Path::new(&handed.cwd)).await.is_ok()
+}
+
+async fn run_wake(wake: crate::wake::Wake, cwd: &Path) -> Result<(), String> {
+    use crate::wake::{Wake, claude_print_args, codex_exec_args};
+    match wake {
+        Wake::CodexApp { session, prompt } => {
+            let transport =
+                mesh_codex::CodexTransport::new(mesh_core::AgentId::new("codex"), "codex");
+            let vendor = mesh_core::VendorSessionId::new(session.clone());
+            if transport.attach(&vendor, cwd).await.is_ok()
+                && transport.prompt(&vendor, &prompt).await.is_ok()
+            {
+                return Ok(());
+            }
+            let args = codex_exec_args("codex", Some(&session), &prompt);
+            crate::wake::run(&args[0], &args, cwd).await
+        }
+        Wake::CodexExec { session, prompt } => {
+            let args = codex_exec_args("codex", session.as_deref(), &prompt);
+            crate::wake::run(&args[0], &args, cwd).await
+        }
+        Wake::ClaudePrint { session, prompt } => {
+            let args = claude_print_args("claude", session.as_deref(), &prompt);
+            crate::wake::run(&args[0], &args, cwd).await
+        }
+    }
 }
 
 fn local_nodes(hub: &Hub) -> Vec<RegisteredNode> {

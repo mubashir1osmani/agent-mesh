@@ -466,12 +466,13 @@ impl Hub {
                 })
             });
             let gate = Arc::new(tokio::sync::Mutex::new(()));
+            let wake_limit = config.wake_budget_per_hour;
             Self {
                 mesh: Mesh::from_config(&config).with_admission(admission, Arc::clone(&gate)),
                 config,
                 state: Mutex::new(State::default()),
                 spawn_gate: gate,
-                relay: relay_bridge::RelayHandle::new(),
+                relay: relay_bridge::RelayHandle::new(wake_limit),
             }
         })
     }
@@ -1457,6 +1458,14 @@ mod tests {
         async fn ack(&self, _ids: &[String]) -> Result<(), RemoteError> {
             Ok(())
         }
+
+        async fn surface(&self, _ids: &[String]) -> Result<(), RemoteError> {
+            Ok(())
+        }
+
+        async fn allowlist(&self) -> Result<Vec<String>, RemoteError> {
+            Ok(Vec::new())
+        }
     }
 
     fn hub() -> Arc<Hub> {
@@ -1682,6 +1691,7 @@ mod tests {
                 mesh_pro::RelayMessage {
                     id: "m1".to_owned(),
                     to_node: "b".to_owned(),
+                    from_email: None,
                     from_machine: "m2".to_owned(),
                     from_node: "claude-9".to_owned(),
                     text: "hi".to_owned(),
@@ -1690,6 +1700,7 @@ mod tests {
                 },
             )
             .await
+            .is_some()
         );
         let drained = hub
             .dispatch(Request::Inbox {

@@ -249,6 +249,7 @@ async fn send(
         .push(RelayMessage {
             id: "m1".to_owned(),
             to_node: to_node.clone(),
+            from_email: None,
             from_machine: body.from_machine,
             from_node: body.from_node,
             text: body.text,

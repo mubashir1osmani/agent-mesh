@@ -103,6 +103,8 @@ pub struct RelayMessage {
     pub to_node: String,
     pub from_machine: String,
     pub from_node: String,
+    #[serde(default)]
+    pub from_email: Option<String>,
     pub text: String,
     pub hops: u32,
     pub sent_at_unix: u64,
@@ -111,6 +113,32 @@ pub struct RelayMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AckBody {
     pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SurfaceBody {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiptQuery {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Receipt {
+    pub id: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReceiptsResponse {
+    pub receipts: Vec<Receipt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllowList {
+    pub emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

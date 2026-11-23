@@ -29,6 +29,9 @@ pub struct Config {
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_minutes: u64,
 
+    #[serde(default = "default_wake_budget")]
+    pub wake_budget_per_hour: u64,
+
     #[serde(default)]
     pub agents: BTreeMap<String, AgentConfig>,
 
@@ -50,6 +53,10 @@ fn default_max_processes() -> usize {
 
 fn default_idle_timeout() -> u64 {
     30
+}
+
+fn default_wake_budget() -> u64 {
+    6
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,18 +106,18 @@ fn codex_command() -> String {
 impl AgentConfig {
     pub fn enabled(&self) -> bool {
         match self {
-            Self::Acp { enabled, .. } | Self::Claude { enabled, .. } | Self::Codex { enabled, .. } => {
-                *enabled
-            }
+            Self::Acp { enabled, .. }
+            | Self::Claude { enabled, .. }
+            | Self::Codex { enabled, .. } => *enabled,
         }
     }
 
     /// The executable this agent needs on PATH.
     pub fn command(&self) -> &str {
         match self {
-            Self::Acp { command, .. } | Self::Claude { command, .. } | Self::Codex { command, .. } => {
-                command
-            }
+            Self::Acp { command, .. }
+            | Self::Claude { command, .. }
+            | Self::Codex { command, .. } => command,
         }
     }
 }
@@ -157,6 +164,7 @@ impl Config {
             turn_timeout_seconds: default_timeout(),
             max_processes: default_max_processes(),
             idle_timeout_minutes: default_idle_timeout(),
+            wake_budget_per_hour: default_wake_budget(),
             telemetry: mesh_telemetry::TelemetryConfig::default(),
             agents: BTreeMap::from([
                 (
@@ -283,7 +291,10 @@ mod tests {
         let cfg = Config::load(&path).expect("loads");
 
         assert_eq!(cfg.max_processes, 8);
-        assert!(cfg.agents.contains_key("codex"), "built-in agents must remain");
+        assert!(
+            cfg.agents.contains_key("codex"),
+            "built-in agents must remain"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
