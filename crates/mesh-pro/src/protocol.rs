@@ -72,6 +72,8 @@ pub struct PeerNode {
     #[serde(default)]
     pub name: Option<String>,
     pub agent: String,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +86,8 @@ pub struct SendBody {
     #[serde(default)]
     pub to_machine: Option<String>,
     pub to_node: String,
+    #[serde(default)]
+    pub to_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,12 +98,47 @@ pub struct SendAck {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayMessage {
+    #[serde(default)]
+    pub id: String,
     pub to_node: String,
     pub from_machine: String,
     pub from_node: String,
     pub text: String,
     pub hops: u32,
     pub sent_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AckBody {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamCreateBody {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamInviteBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllowBody {
+    pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamMember {
+    pub email: String,
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TeamState {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<TeamMember>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

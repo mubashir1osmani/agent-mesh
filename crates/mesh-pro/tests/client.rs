@@ -247,6 +247,7 @@ async fn send(
         .entry((token, to_machine.clone()))
         .or_default()
         .push(RelayMessage {
+            id: "m1".to_owned(),
             to_node: to_node.clone(),
             from_machine: body.from_machine,
             from_node: body.from_node,
@@ -298,6 +299,7 @@ async fn peers(
                 id: node.id.clone(),
                 name: node.name.clone(),
                 agent: node.agent.clone(),
+                email: None,
             })
         })
         .collect();

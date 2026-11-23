@@ -10,8 +10,9 @@ pub use entitlement::{
 pub use error::AccountError;
 pub use http::ApiClient;
 pub use protocol::{
-    DEFAULT_CACHE_TTL_SECONDS, DevicePoll, DeviceStart, DeviceTokenBody, Entitlement, PeerNode,
-    PeersResponse, PollBody, PollResponse, RegisterBody, RegisteredNode, RelayMessage, SendAck,
-    SendBody, parse_remote_target, remote_target_id,
+    AckBody, AllowBody, DEFAULT_CACHE_TTL_SECONDS, DevicePoll, DeviceStart, DeviceTokenBody,
+    Entitlement, PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody, RegisteredNode,
+    RelayMessage, SendAck, SendBody, TeamCreateBody, TeamInviteBody, TeamMember, TeamState,
+    parse_remote_target, remote_target_id,
 };
 pub use relay_client::RelayClient;

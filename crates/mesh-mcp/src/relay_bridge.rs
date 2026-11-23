@@ -1,6 +1,7 @@
 use super::{Hub, Message, Node};
 use async_trait::async_trait;
 use mesh_pro::{PeerNode, RegisteredNode, RelayMessage};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,6 +15,7 @@ pub(super) struct RelayHandle {
     enabled: AtomicBool,
     slot: Mutex<Option<Slot>>,
     peers: Mutex<Vec<PeerNode>>,
+    surfaced: Mutex<HashSet<String>>,
 }
 
 struct Slot {
@@ -28,6 +30,7 @@ impl RelayHandle {
             enabled: AtomicBool::new(false),
             slot: Mutex::new(None),
             peers: Mutex::new(Vec::new()),
+            surfaced: Mutex::new(HashSet::new()),
         }
     }
 }
@@ -36,6 +39,7 @@ pub(crate) struct Outbound {
     pub from_node: String,
     pub to_machine: Option<String>,
     pub to_node: String,
+    pub to_email: Option<String>,
     pub text: String,
     pub hops: u32,
 }
@@ -60,6 +64,7 @@ pub(crate) trait RemoteMesh: Send + Sync {
     async fn register(&self, nodes: &[RegisteredNode]) -> Result<(), RemoteError>;
     async fn poll(&self, wait_ms: u64) -> Result<Vec<RelayMessage>, RemoteError>;
     async fn peers(&self) -> Result<Vec<PeerNode>, RemoteError>;
+    async fn ack(&self, ids: &[String]) -> Result<(), RemoteError>;
 }
 
 struct LiveRemote {
@@ -69,6 +74,19 @@ struct LiveRemote {
 #[async_trait]
 impl RemoteMesh for LiveRemote {
     async fn send(&self, message: &Outbound) -> Result<mesh_pro::SendAck, RemoteError> {
+        if let Some(email) = &message.to_email {
+            return self
+                .client
+                .send_to_email(
+                    &message.from_node,
+                    email,
+                    &message.to_node,
+                    &message.text,
+                    message.hops,
+                )
+                .await
+                .map_err(remote_error);
+        }
         self.client
             .send(
                 &message.from_node,
@@ -91,6 +109,10 @@ impl RemoteMesh for LiveRemote {
 
     async fn peers(&self) -> Result<Vec<PeerNode>, RemoteError> {
         self.client.peers().await.map_err(remote_error)
+    }
+
+    async fn ack(&self, ids: &[String]) -> Result<(), RemoteError> {
+        self.client.ack(ids).await.map_err(remote_error)
     }
 }
 
@@ -144,12 +166,17 @@ pub(super) async fn try_remote(
         return Err(mesh_pro::upgrade_message());
     }
 
-    let (to_machine, to_node, speculative) = if let Some((machine, node)) = explicit {
-        (Some(machine), node, false)
+    let (to_machine, to_node, to_email, speculative) = if let Some((machine, node)) = explicit {
+        (Some(machine), node, None, false)
     } else if let Some(peer) = unique_peer(hub, to)? {
-        (Some(peer.machine_id), peer.id, false)
+        let to_node = if peer.email.is_some() {
+            peer.name.clone().unwrap_or_else(|| peer.id.clone())
+        } else {
+            peer.id.clone()
+        };
+        (Some(peer.machine_id), to_node, peer.email, false)
     } else {
-        (None, to.to_owned(), true)
+        (None, to.to_owned(), None, true)
     };
     if to_node == from && to_machine.as_deref() == Some(our_machine().as_str()) {
         return Err("a node cannot message itself".to_owned());
@@ -166,6 +193,7 @@ pub(super) async fn try_remote(
             from_node: from.to_owned(),
             to_machine,
             to_node,
+            to_email,
             text: text.to_owned(),
             hops,
         })
@@ -210,8 +238,33 @@ pub(super) fn remote_nodes(hub: &Hub) -> Vec<Node> {
 }
 
 pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> bool {
-    let Some(target) = hub.with(|state| state.nodes.get(&message.to_node).cloned()) else {
-        tracing::info!(node = %message.to_node, "dropping a relay message for a node that is gone");
+    let Some(target) = hub.with(|state| {
+        let locals: Vec<Node> = state
+            .nodes
+            .values()
+            .filter(|node| node.machine_id.is_none())
+            .cloned()
+            .collect();
+        locals
+            .iter()
+            .find(|node| {
+                node.id == message.to_node || node.name.as_deref() == Some(message.to_node.as_str())
+            })
+            .cloned()
+            .or_else(|| {
+                let matched: Vec<Node> = locals
+                    .iter()
+                    .filter(|node| stable_name(&node.agent) == message.to_node)
+                    .cloned()
+                    .collect();
+                if matched.len() == 1 {
+                    matched.into_iter().next()
+                } else {
+                    None
+                }
+            })
+    }) else {
+        tracing::info!(node = %message.to_node, "relay message has no local node yet");
         return false;
     };
     let local = Message {
@@ -250,8 +303,20 @@ async fn sync(hub: &Hub) -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     let peers = remote.peers().await.map_err(|err| err.to_string())?;
     *lock(&hub.relay.peers) = peers;
+    let mut acked = Vec::new();
     for message in remote.poll(2_000).await.map_err(|err| err.to_string())? {
-        deliver(hub, message).await;
+        let id = message.id.clone();
+        if !id.is_empty() && lock(&hub.relay.surfaced).contains(&id) {
+            acked.push(id);
+            continue;
+        }
+        if deliver(hub, message).await && !id.is_empty() {
+            lock(&hub.relay.surfaced).insert(id.clone());
+            acked.push(id);
+        }
+    }
+    if !acked.is_empty() {
+        remote.ack(&acked).await.map_err(|err| err.to_string())?;
     }
     Ok(())
 }
@@ -264,7 +329,12 @@ fn local_nodes(hub: &Hub) -> Vec<RegisteredNode> {
             .filter(|node| node.machine_id.is_none())
             .map(|node| RegisteredNode {
                 id: node.id.clone(),
-                name: node.name.clone(),
+                name: Some(
+                    node.name
+                        .clone()
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| stable_name(&node.agent)),
+                ),
                 agent: node.agent.clone(),
             })
             .collect()
@@ -312,6 +382,7 @@ fn disable(hub: &Hub) {
     hub.relay.enabled.store(false, Ordering::Release);
     *lock(&hub.relay.slot) = None;
     *lock(&hub.relay.peers) = Vec::new();
+    lock(&hub.relay.surfaced).clear();
 }
 
 async fn pro_on(hub: &Hub, explicit: bool) -> bool {
@@ -350,6 +421,21 @@ fn unique_peer(hub: &Hub, to: &str) -> Result<Option<PeerNode>, String> {
                 .join(", ")
         )),
     }
+}
+
+fn stable_name(agent: &str) -> String {
+    let path = super::home_dir().join("names").join(agent);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let name = existing.trim();
+        if !name.is_empty() && name.len() <= 200 && !name.contains(['/', '\n', '\r']) {
+            return name.to_owned();
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, agent);
+    agent.to_owned()
 }
 
 fn our_machine() -> String {
