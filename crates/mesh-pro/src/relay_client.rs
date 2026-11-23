@@ -1,8 +1,9 @@
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{
-    AckBody, AllowBody, PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody,
-    RegisteredNode, RelayMessage, SendAck, SendBody, TeamCreateBody, TeamInviteBody, TeamState,
+    AckBody, AllowBody, AllowList, PeerNode, PeersResponse, PollBody, PollResponse, Receipt,
+    ReceiptQuery, ReceiptsResponse, RegisterBody, RegisteredNode, RelayMessage, SendAck, SendBody,
+    SurfaceBody, TeamCreateBody, TeamInviteBody, TeamState,
 };
 use std::time::Duration;
 
@@ -106,6 +107,44 @@ impl RelayClient {
             .post_json(&url, &self.token, &body, Duration::from_secs(10))
             .await?;
         serde_json::from_str(&raw).map_err(AccountError::from)
+    }
+
+    pub async fn surface(&self, ids: &[String]) -> Result<(), AccountError> {
+        let url = format!("{}/v1/relay/surface", self.api_base);
+        self.http
+            .post_json(
+                &url,
+                &self.token,
+                &SurfaceBody { ids: ids.to_vec() },
+                Duration::from_secs(10),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn receipts(&self, ids: &[String]) -> Result<Vec<Receipt>, AccountError> {
+        let url = format!("{}/v1/relay/receipts", self.api_base);
+        let raw = self
+            .http
+            .post_json(
+                &url,
+                &self.token,
+                &ReceiptQuery { ids: ids.to_vec() },
+                Duration::from_secs(10),
+            )
+            .await?;
+        let parsed: ReceiptsResponse = serde_json::from_str(&raw)?;
+        Ok(parsed.receipts)
+    }
+
+    pub async fn allowlist(&self) -> Result<Vec<String>, AccountError> {
+        let url = format!("{}/v1/allow", self.api_base);
+        let raw = self
+            .http
+            .get_json(&url, &self.token, Duration::from_secs(10))
+            .await?;
+        let parsed: AllowList = serde_json::from_str(&raw)?;
+        Ok(parsed.emails)
     }
 
     pub async fn ack(&self, ids: &[String]) -> Result<(), AccountError> {

@@ -10,6 +10,7 @@ mod ps;
 mod team;
 mod tmux;
 mod tools;
+mod wake;
 
 use config::Config;
 use mesh::Mesh;
@@ -35,6 +36,7 @@ Usage:
   agent-mesh team create <name>
   agent-mesh team invite <email>
   agent-mesh allow <email>   Let that person message your agents
+  agent-mesh receipt <id>    Show queued, delivered, surfaced, or acked
   agent-mesh --version       Print the version and exit
   agent-mesh --help          Print this message and exit
 
@@ -64,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "status" | "whoami" => return account_cmd::status().await,
             "team" => return team::run(args).await,
             "allow" => return team::allow(args).await,
+            "receipt" => return team::receipt(args).await,
             "--version" | "-V" => println!("agent-mesh {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print!("{USAGE}"),
             other => {

@@ -22,6 +22,17 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn s
     }
 }
 
+pub async fn receipt(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let id = args.next().ok_or("agent-mesh receipt needs an id")?;
+    let found = client()?.receipts(&[id]).await?;
+    for receipt in found {
+        println!("{} {}", receipt.id, receipt.state);
+    }
+    Ok(())
+}
+
 pub async fn allow(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -36,6 +36,22 @@ pub struct KillResult {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReceiptArgs {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReceiptView {
+    pub id: String,
+    pub state: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReceiptResult {
+    pub receipts: Vec<ReceiptView>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendMessageArgs {
     /// Node id from `list_nodes`, e.g. `codex-3f9a1c2e`, or the name it was spawned with.
     pub to: String,
@@ -354,6 +370,35 @@ impl MeshServer {
             .map_err(hub_error)?;
         Ok(Json(InboxResult {
             messages: from_value(data)?,
+        }))
+    }
+
+    #[tool(
+        name = "relay_receipt",
+        description = "Read delivery receipts for messages this account sent. Each id is queued, \
+                       delivered, surfaced, or acked."
+    )]
+    async fn relay_receipt(
+        &self,
+        Parameters(args): Parameters<ReceiptArgs>,
+    ) -> Result<Json<ReceiptResult>, ErrorData> {
+        let creds = mesh_pro::Store::from_env()
+            .load()
+            .ok_or_else(|| ErrorData::invalid_params("not logged in", None))?;
+        let client = mesh_pro::RelayClient::new(creds.api_base, creds.token, "local")
+            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+        let receipts = client
+            .receipts(&args.ids)
+            .await
+            .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+        Ok(Json(ReceiptResult {
+            receipts: receipts
+                .into_iter()
+                .map(|receipt| ReceiptView {
+                    id: receipt.id,
+                    state: receipt.state,
+                })
+                .collect(),
         }))
     }
 
