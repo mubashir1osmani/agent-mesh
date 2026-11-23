@@ -12,7 +12,7 @@ pub use http::ApiClient;
 pub use protocol::{
     AckBody, AllowBody, DEFAULT_CACHE_TTL_SECONDS, DevicePoll, DeviceStart, DeviceTokenBody,
     Entitlement, PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody, RegisteredNode,
-    RelayMessage, SendAck, SendBody, TeamCreateBody, TeamInviteBody, TeamState,
+    RelayMessage, SendAck, SendBody, TeamCreateBody, TeamInviteBody, TeamMember, TeamState,
     parse_remote_target, remote_target_id,
 };
 pub use relay_client::RelayClient;
