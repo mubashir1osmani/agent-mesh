@@ -51,8 +51,7 @@ impl RelayClient {
         text: &str,
         hops: u32,
     ) -> Result<SendAck, AccountError> {
-        let url = format!("{}/v1/relay/send", self.api_base);
-        let body = SendBody {
+        self.post_send(SendBody {
             from_machine: self.machine_id.clone(),
             from_node: from_node.to_owned(),
             text: text.to_owned(),
@@ -60,12 +59,8 @@ impl RelayClient {
             to_machine: to_machine.map(str::to_owned),
             to_node: to_node.to_owned(),
             to_email: None,
-        };
-        let raw = self
-            .http
-            .post_json(&url, &self.token, &body, Duration::from_secs(10))
-            .await?;
-        serde_json::from_str(&raw).map_err(AccountError::from)
+        })
+        .await
     }
 
     pub async fn poll(&self, wait_ms: u64) -> Result<Vec<RelayMessage>, AccountError> {
@@ -92,8 +87,7 @@ impl RelayClient {
         text: &str,
         hops: u32,
     ) -> Result<SendAck, AccountError> {
-        let url = format!("{}/v1/relay/send", self.api_base);
-        let body = SendBody {
+        self.post_send(SendBody {
             from_machine: self.machine_id.clone(),
             from_node: from_node.to_owned(),
             text: text.to_owned(),
@@ -101,7 +95,12 @@ impl RelayClient {
             to_machine: None,
             to_node: to_node.to_owned(),
             to_email: Some(to_email.to_owned()),
-        };
+        })
+        .await
+    }
+
+    async fn post_send(&self, body: SendBody) -> Result<SendAck, AccountError> {
+        let url = format!("{}/v1/relay/send", self.api_base);
         let raw = self
             .http
             .post_json(&url, &self.token, &body, Duration::from_secs(10))

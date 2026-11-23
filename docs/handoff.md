@@ -1,7 +1,7 @@
 # Handoff
 
-A stable name is the address. It defaults to the agent kind and is kept in the mesh home directory, so a restarted session is the same addressee.
+The address is the agent name. It defaults to the agent kind and is stored under the mesh home directory.
 
-Claude Code surfaces a queued message on the next `user-prompt-submit` or `stop` hook (`agent-mesh hook user-prompt-submit` and `agent-mesh hook stop`). A live tmux pane receives the text as soon as it arrives.
+Claude Code inserts queued messages from `agent-mesh hook user-prompt-submit` and `agent-mesh hook stop`. A live tmux pane gets the text when it arrives.
 
-Codex receives the text immediately in a live tmux pane. An idle Codex session is not woken; it sees the message when `check_inbox` runs.
+Codex gets the text in a live tmux pane. An idle Codex session does not. It sees the message from `check_inbox`.

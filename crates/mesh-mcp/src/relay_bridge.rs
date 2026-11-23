@@ -238,8 +238,33 @@ pub(super) fn remote_nodes(hub: &Hub) -> Vec<Node> {
 }
 
 pub(super) async fn deliver(hub: &Hub, message: RelayMessage) -> bool {
-    let Some(target) = hub.with(|state| state.nodes.get(&message.to_node).cloned()) else {
-        tracing::info!(node = %message.to_node, "dropping a relay message for a node that is gone");
+    let Some(target) = hub.with(|state| {
+        let locals: Vec<Node> = state
+            .nodes
+            .values()
+            .filter(|node| node.machine_id.is_none())
+            .cloned()
+            .collect();
+        locals
+            .iter()
+            .find(|node| {
+                node.id == message.to_node || node.name.as_deref() == Some(message.to_node.as_str())
+            })
+            .cloned()
+            .or_else(|| {
+                let matched: Vec<Node> = locals
+                    .iter()
+                    .filter(|node| stable_name(&node.agent) == message.to_node)
+                    .cloned()
+                    .collect();
+                if matched.len() == 1 {
+                    matched.into_iter().next()
+                } else {
+                    None
+                }
+            })
+    }) else {
+        tracing::info!(node = %message.to_node, "relay message has no local node yet");
         return false;
     };
     let local = Message {
