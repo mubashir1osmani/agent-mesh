@@ -1,8 +1,8 @@
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{
-    PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody, RegisteredNode, RelayMessage,
-    SendAck, SendBody,
+    AckBody, AllowBody, PeerNode, PeersResponse, PollBody, PollResponse, RegisterBody,
+    RegisteredNode, RelayMessage, SendAck, SendBody, TeamCreateBody, TeamInviteBody, TeamState,
 };
 use std::time::Duration;
 
@@ -59,6 +59,7 @@ impl RelayClient {
             hops,
             to_machine: to_machine.map(str::to_owned),
             to_node: to_node.to_owned(),
+            to_email: None,
         };
         let raw = self
             .http
@@ -81,6 +82,88 @@ impl RelayClient {
             .await?;
         let parsed: PollResponse = serde_json::from_str(&raw)?;
         Ok(parsed.messages)
+    }
+
+    pub async fn send_to_email(
+        &self,
+        from_node: &str,
+        to_email: &str,
+        to_node: &str,
+        text: &str,
+        hops: u32,
+    ) -> Result<SendAck, AccountError> {
+        let url = format!("{}/v1/relay/send", self.api_base);
+        let body = SendBody {
+            from_machine: self.machine_id.clone(),
+            from_node: from_node.to_owned(),
+            text: text.to_owned(),
+            hops,
+            to_machine: None,
+            to_node: to_node.to_owned(),
+            to_email: Some(to_email.to_owned()),
+        };
+        let raw = self
+            .http
+            .post_json(&url, &self.token, &body, Duration::from_secs(10))
+            .await?;
+        serde_json::from_str(&raw).map_err(AccountError::from)
+    }
+
+    pub async fn ack(&self, ids: &[String]) -> Result<(), AccountError> {
+        let url = format!("{}/v1/relay/ack", self.api_base);
+        let body = AckBody { ids: ids.to_vec() };
+        self.http
+            .post_json(&url, &self.token, &body, Duration::from_secs(10))
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn create_team(&self, name: &str) -> Result<TeamState, AccountError> {
+        self.team_post(
+            "/v1/team",
+            &TeamCreateBody {
+                name: name.to_owned(),
+            },
+        )
+        .await
+    }
+
+    pub async fn invite(&self, email: &str) -> Result<TeamState, AccountError> {
+        self.team_post(
+            "/v1/team/invite",
+            &TeamInviteBody {
+                email: email.to_owned(),
+            },
+        )
+        .await
+    }
+
+    pub async fn allow_email(&self, email: &str) -> Result<(), AccountError> {
+        let url = format!("{}/v1/allow", self.api_base);
+        self.http
+            .post_json(
+                &url,
+                &self.token,
+                &AllowBody {
+                    email: email.to_owned(),
+                },
+                Duration::from_secs(10),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    async fn team_post<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<TeamState, AccountError> {
+        let url = format!("{}{path}", self.api_base);
+        let raw = self
+            .http
+            .post_json(&url, &self.token, body, Duration::from_secs(10))
+            .await?;
+        serde_json::from_str(&raw).map_err(AccountError::from)
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerNode>, AccountError> {

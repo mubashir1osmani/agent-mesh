@@ -7,6 +7,7 @@ mod hook;
 mod hub;
 mod mesh;
 mod ps;
+mod team;
 mod tmux;
 mod tools;
 
@@ -31,6 +32,9 @@ Usage:
   agent-mesh login           Log in
   agent-mesh logout          Log out
   agent-mesh status          Show the account (`whoami`)
+  agent-mesh team create <name>
+  agent-mesh team invite <email>
+  agent-mesh allow <email>   Let that person message your agents
   agent-mesh --version       Print the version and exit
   agent-mesh --help          Print this message and exit
 
@@ -58,6 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "login" => return account_cmd::login(args).await,
             "logout" => return account_cmd::logout(),
             "status" | "whoami" => return account_cmd::status().await,
+            "team" => return team::run(args).await,
+            "allow" => return team::allow(args).await,
             "--version" | "-V" => println!("agent-mesh {}", env!("CARGO_PKG_VERSION")),
             "--help" | "-h" => print!("{USAGE}"),
             other => {

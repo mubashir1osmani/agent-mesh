@@ -1453,6 +1453,10 @@ mod tests {
         async fn peers(&self) -> Result<Vec<mesh_pro::PeerNode>, RemoteError> {
             Ok(Vec::new())
         }
+
+        async fn ack(&self, _ids: &[String]) -> Result<(), RemoteError> {
+            Ok(())
+        }
     }
 
     fn hub() -> Arc<Hub> {
@@ -1646,6 +1650,7 @@ mod tests {
                 id: "claude-9".to_owned(),
                 name: Some("remote-reviewer".to_owned()),
                 agent: "claude".to_owned(),
+                email: None,
             }],
         );
 
@@ -1675,6 +1680,7 @@ mod tests {
             relay_bridge::deliver(
                 &hub,
                 mesh_pro::RelayMessage {
+                    id: "m1".to_owned(),
                     to_node: "b".to_owned(),
                     from_machine: "m2".to_owned(),
                     from_node: "claude-9".to_owned(),
