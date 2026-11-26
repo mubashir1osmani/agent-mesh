@@ -7,6 +7,7 @@ mod hook;
 mod hub;
 mod mesh;
 mod ps;
+mod session;
 mod team;
 mod tmux;
 mod tools;
