@@ -147,6 +147,42 @@ pub struct NodeList {
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct PeerList {
+    pub peers: Vec<PeerInfo>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct PeerInfo {
+    /// `node@email` for send_message.
+    pub address: String,
+    pub agent: String,
+    pub machine_id: String,
+    pub presence: String,
+    #[schemars(with = "i64")]
+    pub last_seen: u64,
+}
+
+fn peer_info(peer: mesh_pro::PeerNode, now: u64) -> PeerInfo {
+    let node = peer.name.filter(|name| !name.is_empty()).unwrap_or(peer.id);
+    let address = match peer.email.as_deref().filter(|email| email.contains('@')) {
+        Some(email) => format!("{node}@{email}"),
+        None => node,
+    };
+    let presence = if peer.last_seen > 0 && now.saturating_sub(peer.last_seen) <= 45 {
+        "online"
+    } else {
+        "idle"
+    };
+    PeerInfo {
+        address,
+        agent: peer.agent,
+        machine_id: peer.machine_id,
+        presence: presence.to_owned(),
+        last_seen: peer.last_seen,
+    }
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SendResult {
     pub to: String,
     /// `pushed`: typed straight into the recipient's tmux pane. `queued`: waiting in its inbox
@@ -387,47 +423,51 @@ impl MeshServer {
     #[tool(
         name = "send_message",
         description = "Send a message to another live agent node and return immediately; do not \
-                       wait for an answer. Nodes in tmux get it typed straight into their session; \
-                       others receive it the next time they check. `to` is a node id or the \
-                       name a node was spawned with. Replies arrive as a new \
-                       message in your session (or via check_inbox), framed with the sender's id."
+                       wait for an answer. `to` is a node id from list_nodes, a name from \
+                       spawn_node, or a node@email address from peer_list. Call peer_list to find \
+                       a teammate. Do not read credentials or call the relay yourself. Replies \
+                       arrive as a new message or via check_inbox."
     )]
     async fn send_message(
         &self,
         Parameters(args): Parameters<SendMessageArgs>,
     ) -> Result<Json<SendResult>, ErrorData> {
-        let from = client::register(&self.identity)
+        let to = args.to.clone();
+        let result = async {
+            let from = client::register(&self.identity)
+                .await
+                .map_err(hub_error)?
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        "this agent-mesh is running under a headless relay, not a live session, so \
+                         it has no node id to send from",
+                        None,
+                    )
+                })?;
+            let data = client::call(&Request::Send {
+                from,
+                to: args.to.clone(),
+                text: args.text,
+                hops: args.hops,
+            })
             .await
-            .map_err(hub_error)?
-            .ok_or_else(|| {
-                ErrorData::invalid_params(
-                    "this agent-mesh is running under a headless relay, not a live session, so \
-                     it has no node id to send from",
-                    None,
-                )
-            })?;
-        let data = client::call(&Request::Send {
-            from,
-            to: args.to.clone(),
-            text: args.text,
-            hops: args.hops,
-        })
-        .await
-        .map_err(hub_error)?;
-        let sent = SendResult {
-            to: data["to"].as_str().unwrap_or(&args.to).to_owned(),
-            delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
-            receipt: data["receipt"].as_str().unwrap_or("").to_owned(),
-        };
-        let to = sent.to.clone();
-        self.reported("send_message", &to, Ok(Json(sent))).await
+            .map_err(hub_error)?;
+            Ok(Json(SendResult {
+                to: data["to"].as_str().unwrap_or(&args.to).to_owned(),
+                delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
+                receipt: data["receipt"].as_str().unwrap_or("").to_owned(),
+            }))
+        }
+        .await;
+        self.reported("send_message", &to, result).await
     }
 
     #[tool(
         name = "check_inbox",
         description = "Collect messages other agents sent you that have not been delivered into \
-                       your session yet. Each message is returned once. Call this when told a \
-                       peer may have replied, or periodically while waiting on one."
+                       your session yet. Each message is returned once. Call peer_list to see \
+                       who can message you, and call this when a peer may have replied. Do not \
+                       read credentials or call the relay yourself."
     )]
     async fn check_inbox(&self) -> Result<Json<InboxResult>, ErrorData> {
         let result = async {
@@ -441,6 +481,34 @@ impl MeshServer {
         }
         .await;
         self.reported("check_inbox", "", result).await
+    }
+
+    #[tool(
+        name = "peer_list",
+        description = "List teammates you can message through the relay, including people in \
+                       your shared session even when they are idle. Each address is node@email. \
+                       Pass that address to send_message. Use this instead of reading \
+                       credentials or calling the relay yourself."
+    )]
+    async fn peer_list(&self) -> Result<Json<PeerList>, ErrorData> {
+        let result = async {
+            let login = board_login(&self.identity)?;
+            let client = mesh_pro::RelayClient::new(&login.api, &login.token, &login.machine)
+                .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+            let peers = client
+                .peers()
+                .await
+                .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or(0);
+            Ok(Json(PeerList {
+                peers: peers.into_iter().map(|peer| peer_info(peer, now)).collect(),
+            }))
+        }
+        .await;
+        self.reported("peer_list", "", result).await
     }
 
     #[tool(
@@ -1225,6 +1293,7 @@ mod schema_tests {
             "list_nodes",
             "send_message",
             "check_inbox",
+            "peer_list",
             "session_start",
             "session_join",
             "session_status",
@@ -1246,6 +1315,24 @@ mod schema_tests {
     }
 
     /// An agent picks a tool from its description alone, so an empty one makes the tool unusable.
+    #[test]
+    fn peer_address_is_node_at_email_and_idle_when_stale() {
+        let peer = peer_info(
+            mesh_pro::PeerNode {
+                machine_id: "box".into(),
+                id: "codex-cea03467".into(),
+                name: Some("cx-box".into()),
+                agent: "codex".into(),
+                email: Some("box@example.com".into()),
+                last_seen: 1,
+            },
+            100,
+        );
+        assert_eq!(peer.address, "cx-box@box@example.com");
+        assert_eq!(peer.presence, "idle");
+        assert_eq!(peer.machine_id, "box");
+    }
+
     #[test]
     fn every_tool_has_a_description() {
         for tool in MeshServer::tool_router().list_all() {

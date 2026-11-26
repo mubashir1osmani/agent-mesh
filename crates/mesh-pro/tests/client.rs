@@ -302,6 +302,7 @@ async fn peers(
                 name: node.name.clone(),
                 agent: node.agent.clone(),
                 email: None,
+                last_seen: 0,
             })
         })
         .collect();

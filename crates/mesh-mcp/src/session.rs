@@ -101,40 +101,43 @@ pub struct Link<'a> {
 }
 
 pub async fn start(link: &Link<'_>, name: &str) -> Result<Started, String> {
-    let client = client(link)?;
-    let view = client
-        .session_create(name, link.node, link.agent)
-        .await
-        .map_err(|err| err.to_string())?;
-    let saved = save(link.home, link.node, &view).map(|()| started(view));
+    let saved = async {
+        let client = client(link)?;
+        let view = client
+            .session_create(name, link.node, link.agent)
+            .await
+            .map_err(|err| err.to_string())?;
+        save(link.home, link.node, &view).map(|()| started(view))
+    }
+    .await;
     finish(link, "session_start", name, saved).await
 }
 
 pub async fn join(link: &Link<'_>, code: &str) -> Result<BoardStatus, String> {
-    let client = client(link)?;
-    let view = client
-        .session_join(code, link.node, link.agent)
-        .await
-        .map_err(|err| err.to_string())?;
-    let saved =
-        save(link.home, link.node, &view).map(|()| status_of(&view, link.account_id, link.node));
+    let saved = async {
+        let client = client(link)?;
+        let view = client
+            .session_join(code, link.node, link.agent)
+            .await
+            .map_err(|err| err.to_string())?;
+        save(link.home, link.node, &view).map(|()| status_of(&view, link.account_id, link.node))
+    }
+    .await;
     finish(link, "session_join", code, saved).await
 }
 
 pub async fn status(link: &Link<'_>) -> Result<BoardStatus, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let view = client
-        .session_get(&current.id, 0, link.node)
-        .await
-        .map_err(|err| err.to_string())?;
-    finish(
-        link,
-        "session_status",
-        "",
-        Ok(status_of(&view, link.account_id, link.node)),
-    )
-    .await
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let view = client
+            .session_get(&current.id, 0, link.node)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(status_of(&view, link.account_id, link.node))
+    }
+    .await;
+    finish(link, "session_status", "", result).await
 }
 
 pub async fn list_tasks(
@@ -142,43 +145,60 @@ pub async fn list_tasks(
     status_filter: Option<&str>,
     owner_filter: Option<&str>,
 ) -> Result<TaskLines, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let view = client
-        .session_get(&current.id, 0, link.node)
-        .await
-        .map_err(|err| err.to_string())?;
-    let tasks = view
-        .tasks
-        .iter()
-        .filter(|task| status_filter.is_none_or(|status| task.status == status))
-        .filter(|task| {
-            owner_filter.is_none_or(|owner| {
-                task.owner.as_deref().is_some_and(|value| {
-                    value == owner
-                        || value.starts_with(&format!("{owner}@"))
-                        || task.owner_node.as_deref() == Some(owner)
-                        || task.owner_account_id.as_deref() == Some(owner)
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let view = client
+            .session_get(&current.id, 0, link.node)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(TaskLines {
+            tasks: view
+                .tasks
+                .iter()
+                .filter(|task| status_filter.is_none_or(|status| task.status == status))
+                .filter(|task| {
+                    owner_filter.is_none_or(|owner| {
+                        task.owner.as_deref().is_some_and(|value| {
+                            value == owner
+                                || value.starts_with(&format!("{owner}@"))
+                                || task.owner_node.as_deref() == Some(owner)
+                                || task.owner_account_id.as_deref() == Some(owner)
+                        })
+                    })
                 })
-            })
+                .map(|task| line(&view, task))
+                .collect(),
         })
-        .map(|task| line(&view, task))
-        .collect();
-    finish(link, "task_list", "", Ok(TaskLines { tasks })).await
+    }
+    .await;
+    finish(link, "task_list", "", result).await
 }
 
 pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let view = client
-        .session_get(&current.id, 0, link.node)
-        .await
-        .map_err(|err| err.to_string())?;
-    let task = view
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .ok_or_else(|| format!("no task {task_id}"))?;
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let view = client
+            .session_get(&current.id, 0, link.node)
+            .await
+            .map_err(|err| err.to_string())?;
+        let task = view
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .ok_or_else(|| format!("no task {task_id}"))?;
+        detail_of(link, &client, task).await
+    }
+    .await;
+    finish(link, "task_get", task_id, result).await
+}
+
+async fn detail_of(
+    _link: &Link<'_>,
+    client: &RelayClient,
+    task: &BoardTask,
+) -> Result<TaskDetail, String> {
     let ids: Vec<String> = task
         .notes
         .iter()
@@ -210,20 +230,14 @@ pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, Stri
                 .collect(),
         })
         .collect();
-    finish(
-        link,
-        "task_get",
-        task_id,
-        Ok(TaskDetail {
-            id: task.id.clone(),
-            title: task.title.clone(),
-            status: task.status.clone(),
-            owner: task.owner.clone(),
-            rev: task.rev,
-            notes,
-        }),
-    )
-    .await
+    Ok(TaskDetail {
+        id: task.id.clone(),
+        title: task.title.clone(),
+        status: task.status.clone(),
+        owner: task.owner.clone(),
+        rev: task.rev,
+        notes,
+    })
 }
 
 pub async fn add_task(
@@ -232,33 +246,41 @@ pub async fn add_task(
     owner: Option<&str>,
     note: Option<&str>,
 ) -> Result<TaskOut, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let task = client
-        .task_add(&current.id, link.node, title, owner, note)
-        .await
-        .map_err(|err| err.to_string())?;
-    finish(link, "task_add", title, Ok(task_out(task))).await
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let task = client
+            .task_add(&current.id, link.node, title, owner, note)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(task_out(task))
+    }
+    .await;
+    finish(link, "task_add", title, result).await
 }
 
 pub async fn claim_task(link: &Link<'_>, task_id: &str) -> Result<TaskOut, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let view = client
-        .session_get(&current.id, 0, link.node)
-        .await
-        .map_err(|err| err.to_string())?;
-    let rev = view
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .map(|task| task.rev)
-        .ok_or_else(|| format!("no task {task_id}"))?;
-    let task = client
-        .task_claim(&current.id, task_id, link.node, rev)
-        .await
-        .map_err(|err| err.to_string())?;
-    finish(link, "task_claim", task_id, Ok(task_out(task))).await
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let view = client
+            .session_get(&current.id, 0, link.node)
+            .await
+            .map_err(|err| err.to_string())?;
+        let rev = view
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.rev)
+            .ok_or_else(|| format!("no task {task_id}"))?;
+        let task = client
+            .task_claim(&current.id, task_id, link.node, rev)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(task_out(task))
+    }
+    .await;
+    finish(link, "task_claim", task_id, result).await
 }
 
 pub async fn update_task(
@@ -268,33 +290,37 @@ pub async fn update_task(
     owner: Option<&str>,
     title: Option<&str>,
 ) -> Result<TaskOut, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let view = client
-        .session_get(&current.id, 0, link.node)
-        .await
-        .map_err(|err| err.to_string())?;
-    let rev = view
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .map(|task| task.rev)
-        .ok_or_else(|| format!("no task {task_id}"))?;
-    let task = client
-        .task_update(
-            &current.id,
-            task_id,
-            link.node,
-            rev,
-            mesh_pro::TaskFields {
-                status,
-                owner,
-                title,
-            },
-        )
-        .await
-        .map_err(|err| err.to_string())?;
-    finish(link, "task_update", task_id, Ok(task_out(task))).await
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let view = client
+            .session_get(&current.id, 0, link.node)
+            .await
+            .map_err(|err| err.to_string())?;
+        let rev = view
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .map(|task| task.rev)
+            .ok_or_else(|| format!("no task {task_id}"))?;
+        let task = client
+            .task_update(
+                &current.id,
+                task_id,
+                link.node,
+                rev,
+                mesh_pro::TaskFields {
+                    status,
+                    owner,
+                    title,
+                },
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(task_out(task))
+    }
+    .await;
+    finish(link, "task_update", task_id, result).await
 }
 
 pub async fn note_task(
@@ -303,14 +329,18 @@ pub async fn note_task(
     text: &str,
     handoff: bool,
 ) -> Result<TaskDetail, String> {
-    let client = client(link)?;
-    let current = load(link.home, link.node)?;
-    let kind = if handoff { "handoff" } else { "note" };
-    client
-        .task_note(&current.id, task_id, link.node, kind, text)
-        .await
-        .map_err(|err| err.to_string())?;
-    finish(link, "task_note", task_id, get_task(link, task_id).await).await
+    let result = async {
+        let client = client(link)?;
+        let current = load(link.home, link.node)?;
+        let kind = if handoff { "handoff" } else { "note" };
+        client
+            .task_note(&current.id, task_id, link.node, kind, text)
+            .await
+            .map_err(|err| err.to_string())?;
+        get_task(link, task_id).await
+    }
+    .await;
+    finish(link, "task_note", task_id, result).await
 }
 
 async fn finish<T>(
@@ -537,6 +567,7 @@ mod tests {
     #[derive(Clone)]
     struct Fake {
         inner: Arc<Mutex<Board>>,
+        events: Arc<Mutex<Vec<Value>>>,
     }
 
     struct Board {
@@ -544,7 +575,8 @@ mod tests {
         next: u64,
     }
 
-    async fn serve() -> String {
+    async fn serve() -> (String, Arc<Mutex<Vec<Value>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
         let app = Router::new()
             .route("/v1/sessions", post(create))
             .route("/v1/sessions/join", post(join_route))
@@ -554,18 +586,25 @@ mod tests {
             .route("/v1/sessions/{id}/tasks/{task}", post(update))
             .route("/v1/sessions/{id}/tasks/{task}/notes", post(note))
             .route("/v1/relay/receipts", post(receipts))
+            .route("/v1/sessions/{id}/events", post(event_post))
             .with_state(Fake {
                 inner: Arc::new(Mutex::new(Board {
                     tasks: Vec::new(),
                     next: 1,
                 })),
+                events: events.clone(),
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), events)
+    }
+
+    async fn event_post(State(app): State<Fake>, Json(body): Json<Value>) -> Json<Value> {
+        app.events.lock().unwrap().push(body);
+        Json(json!({ "ok": true }))
     }
 
     fn view(state: &Board, code: &str) -> Value {
@@ -719,7 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_share_a_board_and_show_receipts() {
-        let base = serve().await;
+        let (base, events) = serve().await;
         let home = std::env::temp_dir().join(format!("mesh-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
@@ -776,6 +815,15 @@ mod tests {
             .iter()
             .find(|member| member.node == "codex-old")
             .unwrap();
+        let posted = events.lock().unwrap().clone();
+        assert!(posted.iter().any(|event| {
+            event["tool"] == "task_claim" && event["ok"] == false && event["node"] == "codex-b"
+        }));
+        assert!(posted.iter().any(|event| {
+            event["tool"] == "task_claim"
+                && event["ok"] == true
+                && event["error"].as_str().unwrap_or("").is_empty()
+        }));
         assert_eq!(stale.presence, "idle");
         assert_eq!(board.members.len(), 4);
         assert!(

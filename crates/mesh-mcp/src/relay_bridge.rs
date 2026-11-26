@@ -181,6 +181,14 @@ pub(super) async fn try_remote(
         return Err(mesh_pro::upgrade_message());
     }
 
+    let from_label = hub.with(|state| {
+        state
+            .nodes
+            .get(from)
+            .and_then(|node| node.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| from.to_owned())
+    });
     let (to_machine, to_node, to_email, speculative) = if let Some((node, email)) = addressed {
         let machine = lock(&hub.relay.peers).iter().find_map(|peer| {
             (peer.email.as_deref() == Some(email) && peer.name.as_deref() == Some(node))
@@ -199,7 +207,9 @@ pub(super) async fn try_remote(
     } else {
         (None, to.to_owned(), None, true)
     };
-    if to_node == from && to_machine.as_deref() == Some(our_machine().as_str()) {
+    if (to_node == from || to_node == from_label)
+        && to_machine.as_deref() == Some(our_machine().as_str())
+    {
         return Err("a node cannot message itself".to_owned());
     }
 
@@ -211,7 +221,7 @@ pub(super) async fn try_remote(
     hub.rate_limit(from, &rate_key)?;
     match remote
         .send(&Outbound {
-            from_node: from.to_owned(),
+            from_node: from_label,
             to_machine,
             to_node,
             to_email,
@@ -364,6 +374,7 @@ async fn sync(hub: &Hub) -> Result<(), String> {
         let Some(handed) = deliver(hub, message.clone()).await else {
             continue;
         };
+        lock(&hub.relay.surfaced).insert(id.clone());
         let shown = if handed.pushed {
             true
         } else {
