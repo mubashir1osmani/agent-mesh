@@ -1,6 +1,6 @@
 use super::{Hub, Message, Node};
-use mesh_core::AgentTransport;
 use async_trait::async_trait;
+use mesh_core::AgentTransport;
 use mesh_pro::{PeerNode, RegisteredNode, RelayMessage};
 use std::collections::HashSet;
 use std::path::Path;
@@ -172,15 +172,22 @@ pub(super) async fn try_remote(
     hops: u32,
 ) -> Result<Option<serde_json::Value>, String> {
     let explicit = mesh_pro::parse_remote_target(to);
-    let enabled = pro_on(hub, explicit.is_some()).await;
-    if explicit.is_none() && !enabled {
+    let addressed = node_email(to);
+    let enabled = pro_on(hub, explicit.is_some() || addressed.is_some()).await;
+    if explicit.is_none() && addressed.is_none() && !enabled {
         return Ok(None);
     }
     if !enabled {
         return Err(mesh_pro::upgrade_message());
     }
 
-    let (to_machine, to_node, to_email, speculative) = if let Some((machine, node)) = explicit {
+    let (to_machine, to_node, to_email, speculative) = if let Some((node, email)) = addressed {
+        let machine = lock(&hub.relay.peers).iter().find_map(|peer| {
+            (peer.email.as_deref() == Some(email) && peer.name.as_deref() == Some(node))
+                .then(|| peer.machine_id.clone())
+        });
+        (machine, node.to_owned(), Some(email.to_owned()), false)
+    } else if let Some((machine, node)) = explicit {
         (Some(machine), node, None, false)
     } else if let Some(peer) = unique_peer(hub, to)? {
         let to_node = if peer.email.is_some() {
@@ -524,6 +531,14 @@ fn unique_peer(hub: &Hub, to: &str) -> Result<Option<PeerNode>, String> {
                 .join(", ")
         )),
     }
+}
+
+fn node_email(raw: &str) -> Option<(&str, &str)> {
+    let (node, email) = raw.split_once('@')?;
+    if node.is_empty() || !email.contains('@') || !email.contains('.') {
+        return None;
+    }
+    Some((node, email))
 }
 
 fn stable_name(agent: &str) -> String {
