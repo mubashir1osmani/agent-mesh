@@ -1,11 +1,17 @@
 use crate::error::AccountError;
 use crate::http::ApiClient;
 use crate::protocol::{
-    AckBody, AllowBody, AllowList, PeerNode, PeersResponse, PollBody, PollResponse, Receipt,
-    ReceiptQuery, ReceiptsResponse, RegisterBody, RegisteredNode, RelayMessage, SendAck, SendBody,
-    SurfaceBody, TeamCreateBody, TeamInviteBody, TeamState,
+    AckBody, AllowBody, AllowList, BoardTask, BoardView, PeerNode, PeersResponse, PollBody,
+    PollResponse, Receipt, ReceiptQuery, ReceiptsResponse, RegisterBody, RegisteredNode,
+    RelayMessage, SendAck, SendBody, SurfaceBody, TeamCreateBody, TeamInviteBody, TeamState,
 };
 use std::time::Duration;
+
+pub struct TaskFields<'a> {
+    pub status: Option<&'a str>,
+    pub owner: Option<&'a str>,
+    pub title: Option<&'a str>,
+}
 
 pub struct RelayClient {
     http: ApiClient,
@@ -200,6 +206,134 @@ impl RelayClient {
         let raw = self
             .http
             .post_json(&url, &self.token, body, Duration::from_secs(10))
+            .await?;
+        serde_json::from_str(&raw).map_err(AccountError::from)
+    }
+
+    pub async fn session_create(
+        &self,
+        name: &str,
+        node: &str,
+        agent: &str,
+    ) -> Result<BoardView, AccountError> {
+        self.board_post(
+            "/v1/sessions",
+            &serde_json::json!({
+                "name": name,
+                "machine_id": self.machine_id,
+                "node": node,
+                "agent": agent,
+            }),
+        )
+        .await
+    }
+
+    pub async fn session_join(
+        &self,
+        code: &str,
+        node: &str,
+        agent: &str,
+    ) -> Result<BoardView, AccountError> {
+        self.board_post(
+            "/v1/sessions/join",
+            &serde_json::json!({
+                "code": code,
+                "machine_id": self.machine_id,
+                "node": node,
+                "agent": agent,
+            }),
+        )
+        .await
+    }
+
+    pub async fn session_get(&self, id: &str, since: u64) -> Result<BoardView, AccountError> {
+        let url = format!("{}/v1/sessions/{id}?since={since}&wait_ms=0", self.api_base);
+        let raw = self
+            .http
+            .get_json(&url, &self.token, Duration::from_secs(30))
+            .await?;
+        serde_json::from_str(&raw).map_err(AccountError::from)
+    }
+
+    pub async fn task_add(
+        &self,
+        session_id: &str,
+        node: &str,
+        title: &str,
+        owner: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<BoardTask, AccountError> {
+        self.board_post(
+            &format!("/v1/sessions/{session_id}/tasks"),
+            &serde_json::json!({
+                "node": node,
+                "title": title,
+                "owner": owner,
+                "note": note,
+            }),
+        )
+        .await
+    }
+
+    pub async fn task_claim(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        node: &str,
+        rev: u64,
+    ) -> Result<BoardTask, AccountError> {
+        self.board_post(
+            &format!("/v1/sessions/{session_id}/tasks/{task_id}/claim"),
+            &serde_json::json!({ "node": node, "rev": rev }),
+        )
+        .await
+    }
+
+    pub async fn task_update(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        node: &str,
+        rev: u64,
+        fields: TaskFields<'_>,
+    ) -> Result<BoardTask, AccountError> {
+        self.board_post(
+            &format!("/v1/sessions/{session_id}/tasks/{task_id}"),
+            &serde_json::json!({
+                "node": node,
+                "rev": rev,
+                "status": fields.status,
+                "owner": fields.owner,
+                "title": fields.title,
+            }),
+        )
+        .await
+    }
+
+    pub async fn task_note(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        node: &str,
+        kind: &str,
+        text: &str,
+    ) -> Result<BoardTask, AccountError> {
+        self.board_post(
+            &format!("/v1/sessions/{session_id}/tasks/{task_id}/notes"),
+            &serde_json::json!({ "node": node, "kind": kind, "text": text }),
+        )
+        .await
+    }
+
+    async fn board_post<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, AccountError> {
+        let url = format!("{}{path}", self.api_base);
+        let raw = self
+            .http
+            .post_json(&url, &self.token, body, Duration::from_secs(15))
             .await?;
         serde_json::from_str(&raw).map_err(AccountError::from)
     }

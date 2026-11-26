@@ -1149,6 +1149,7 @@ name = "mesh-mcp"
 version = "0.0.4"
 dependencies = [
  "async-trait",
+ "axum",
  "mesh-acp",
  "mesh-claude",
  "mesh-codex",

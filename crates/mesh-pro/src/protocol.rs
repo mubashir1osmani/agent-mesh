@@ -186,6 +186,64 @@ pub struct PeersResponse {
     pub peers: Vec<PeerNode>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardMember {
+    pub account_id: String,
+    pub machine_id: String,
+    pub node: String,
+    pub agent: String,
+    #[serde(default)]
+    pub email: String,
+    pub joined_at: u64,
+    pub last_seen: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardSession {
+    pub id: String,
+    pub team_id: String,
+    pub name: String,
+    pub created_by: String,
+    pub created_at: u64,
+    #[serde(default)]
+    pub closed_at: Option<u64>,
+    pub members: Vec<BoardMember>,
+    pub rev: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardNote {
+    pub at: u64,
+    pub by: String,
+    pub kind: String,
+    pub text: String,
+    #[serde(default)]
+    pub receipts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardTask {
+    pub id: String,
+    pub session_id: String,
+    pub title: String,
+    pub status: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    pub created_by: String,
+    pub updated_at: u64,
+    pub rev: u64,
+    #[serde(default)]
+    pub notes: Vec<BoardNote>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardView {
+    pub session: BoardSession,
+    pub code: String,
+    pub tasks: Vec<BoardTask>,
+    pub rev: u64,
+}
+
 pub fn remote_target_id(machine_id: &str, node_id: &str) -> String {
     format!("remote:{machine_id}:{node_id}")
 }

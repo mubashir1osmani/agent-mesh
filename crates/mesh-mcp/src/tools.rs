@@ -6,6 +6,7 @@
 use crate::client::{self, Identity};
 use crate::config::Config;
 use crate::hub::{HubError, Message, Node, Request};
+use crate::session;
 use crate::tmux;
 use mesh_core::{AgentId, Capabilities, Reply, SessionEntry, Speaker, Transcript, VendorSessionId};
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -33,6 +34,57 @@ pub struct KillNodeArgs {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct KillResult {
     pub killed: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SessionStartArgs {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SessionJoinArgs {
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskListArgs {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskIdArgs {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskAddArgs {
+    pub title: String,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskUpdateArgs {
+    pub id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TaskNoteArgs {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub handoff: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -403,6 +455,161 @@ impl MeshServer {
     }
 
     #[tool(
+        name = "session_start",
+        description = "Start a shared session for the current team and join it from this agent. \
+                       Returns the join code. At the start of a turn, call session_status. Claim \
+                       a task before working, and leave a handoff note when you stop."
+    )]
+    async fn session_start(
+        &self,
+        Parameters(args): Parameters<SessionStartArgs>,
+    ) -> Result<Json<session::Started>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::start(&login.link(), &args.name)
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "session_join",
+        description = "Join a shared session by its team/name code or session id. Returns the \
+                       board. Check session_status at the start of a turn, claim before working, \
+                       and leave a handoff note when you stop."
+    )]
+    async fn session_join(
+        &self,
+        Parameters(args): Parameters<SessionJoinArgs>,
+    ) -> Result<Json<session::BoardStatus>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::join(&login.link(), &args.code)
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "session_status",
+        description = "Show the current shared session: members, when each was last seen, tasks \
+                       grouped by status, and the tasks this agent owns. Call this at the start \
+                       of a turn when you are in a session."
+    )]
+    async fn session_status(&self) -> Result<Json<session::BoardStatus>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::status(&login.link())
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_list",
+        description = "List tasks on the current shared session, one compact line each. Filter \
+                       by status or owner when you only need one slice of the board."
+    )]
+    async fn task_list(
+        &self,
+        Parameters(args): Parameters<TaskListArgs>,
+    ) -> Result<Json<session::TaskLines>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::list_tasks(&login.link(), args.status.as_deref(), args.owner.as_deref())
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_get",
+        description = "Read one task, including its notes and the receipt state of each notify \
+                       (queued, delivered, surfaced, or acked)."
+    )]
+    async fn task_get(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<Json<session::TaskDetail>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::get_task(&login.link(), &args.id)
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_add",
+        description = "Add a task to the current shared session. Set owner only when it should \
+                       start assigned. Claim a task before you start working on it."
+    )]
+    async fn task_add(
+        &self,
+        Parameters(args): Parameters<TaskAddArgs>,
+    ) -> Result<Json<session::TaskOut>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::add_task(
+            &login.link(),
+            &args.title,
+            args.owner.as_deref(),
+            args.note.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_claim",
+        description = "Claim a task so you are its only owner. If someone else already owns it, \
+                       the error names them as owned by <agent>@<person>. Claim before working."
+    )]
+    async fn task_claim(
+        &self,
+        Parameters(args): Parameters<TaskIdArgs>,
+    ) -> Result<Json<session::TaskOut>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::claim_task(&login.link(), &args.id)
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_update",
+        description = "Change a task's status, title, or owner. Setting owner hands the task off \
+                       and notifies the other members. Leave a handoff note when you stop."
+    )]
+    async fn task_update(
+        &self,
+        Parameters(args): Parameters<TaskUpdateArgs>,
+    ) -> Result<Json<session::TaskOut>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::update_task(
+            &login.link(),
+            &args.id,
+            args.status.as_deref(),
+            args.owner.as_deref(),
+            args.title.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(board_err)
+    }
+
+    #[tool(
+        name = "task_note",
+        description = "Add a note to a task and notify the other session members. Set handoff \
+                       when you are stopping and the next owner should read the note."
+    )]
+    async fn task_note(
+        &self,
+        Parameters(args): Parameters<TaskNoteArgs>,
+    ) -> Result<Json<session::TaskDetail>, ErrorData> {
+        let login = board_login(&self.identity)?;
+        session::note_task(&login.link(), &args.id, &args.text, args.handoff)
+            .await
+            .map(Json)
+            .map_err(board_err)
+    }
+
+    #[tool(
         name = "spawn_node",
         description = "Start a new interactive agent (claude, codex, opencode, gemini, grok) in its \
                        own tmux session, optionally with a first prompt and a `name`. It joins \
@@ -674,6 +881,62 @@ fn absolute(cwd: &str) -> String {
         .unwrap_or_else(|_| cwd.to_owned())
 }
 
+struct BoardLogin {
+    api: String,
+    token: String,
+    machine: String,
+    node: String,
+    agent: String,
+    home: PathBuf,
+}
+
+impl BoardLogin {
+    fn link(&self) -> session::Link<'_> {
+        session::Link {
+            api_base: &self.api,
+            token: &self.token,
+            machine_id: &self.machine,
+            node: &self.node,
+            agent: &self.agent,
+            home: &self.home,
+        }
+    }
+}
+
+fn board_login(identity: &Identity) -> Result<BoardLogin, ErrorData> {
+    let creds = mesh_pro::Store::from_env()
+        .load()
+        .ok_or_else(|| ErrorData::invalid_params("not logged in", None))?;
+    let machine = std::fs::read_to_string(crate::hub::home_dir().join("machine-id"))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "local".to_owned());
+    let (node, agent) = match identity.node.as_ref() {
+        Some(node) => {
+            let name = node
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| node.agent.clone());
+            (name, node.agent.clone())
+        }
+        None => ("codex".to_owned(), "codex".to_owned()),
+    };
+    Ok(BoardLogin {
+        api: creds.api_base,
+        token: creds.token,
+        machine,
+        node,
+        agent,
+        home: crate::hub::home_dir(),
+    })
+}
+
+fn board_err(err: String) -> ErrorData {
+    ErrorData::internal_error(err, None)
+}
+
 fn from_value<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T, ErrorData> {
     serde_json::from_value(value).map_err(|e| ErrorData::internal_error(e.to_string(), None))
 }
@@ -865,6 +1128,15 @@ mod schema_tests {
             "list_nodes",
             "send_message",
             "check_inbox",
+            "session_start",
+            "session_join",
+            "session_status",
+            "task_list",
+            "task_get",
+            "task_add",
+            "task_claim",
+            "task_update",
+            "task_note",
             "spawn_node",
             "peek_node",
             "kill_node",
