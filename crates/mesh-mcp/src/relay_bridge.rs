@@ -524,7 +524,7 @@ fn unique_peer(hub: &Hub, to: &str) -> Result<Option<PeerNode>, String> {
         [] => Ok(None),
         [one] => Ok(Some((*one).clone())),
         many => Err(format!(
-            "`{to}` matches more than one remote node ({}); use the node id instead",
+            "`{to}` matches more than one remote node ({}); address them as node@email",
             many.iter()
                 .map(|peer| mesh_pro::remote_target_id(&peer.machine_id, &peer.id))
                 .collect::<Vec<_>>()
