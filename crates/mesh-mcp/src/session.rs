@@ -377,13 +377,7 @@ fn status_of(view: &BoardView, account_id: &str, node: &str) -> BoardStatus {
     }
     BoardStatus {
         code: view.code.clone(),
-        members: view
-            .session
-            .members
-            .iter()
-            .filter(|member| member_visible(member))
-            .map(member_status)
-            .collect(),
+        members: view.session.members.iter().map(member_status).collect(),
         todo,
         doing,
         blocked,
@@ -428,17 +422,49 @@ fn owns(
     owner == node || owner.starts_with(&format!("{node}@"))
 }
 
-fn member_visible(member: &BoardMember) -> bool {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0);
-    member.last_seen == 0 || now.saturating_sub(member.last_seen) <= 45
+fn line(view: &BoardView, task: &BoardTask) -> String {
+    let who = task
+        .owner
+        .as_deref()
+        .map(|owner| label_owner(view, task, owner))
+        .unwrap_or_else(|| "-".to_owned());
+    format!("{} [{}] {who} {}", task.id, task.status, task.title)
 }
 
-fn line(_view: &BoardView, task: &BoardTask) -> String {
-    let who = task.owner.clone().unwrap_or_else(|| "-".to_owned());
-    format!("{} [{}] {who} {}", task.id, task.status, task.title)
+fn label_owner(view: &BoardView, task: &BoardTask, owner: &str) -> String {
+    let account = task.owner_account_id.as_deref().unwrap_or("");
+    let node = task
+        .owner_node
+        .as_deref()
+        .filter(|node| !node.is_empty())
+        .unwrap_or(owner);
+    if !account.is_empty()
+        && let Some(member) = view.session.members.iter().find(|member| {
+            member.account_id == account && (member.node == node || member.node == owner)
+        })
+    {
+        let person = email_local(&member.email);
+        if !person.is_empty() {
+            let shown = if node.contains('@') { owner } else { node };
+            return format!("{shown}@{person}");
+        }
+    }
+    if owner.contains('@') {
+        return owner.to_owned();
+    }
+    let person = view
+        .session
+        .members
+        .iter()
+        .find(|member| member.node == owner)
+        .map(|member| email_local(&member.email))
+        .filter(|person| !person.is_empty())
+        .unwrap_or_else(|| owner.to_owned());
+    format!("{owner}@{person}")
+}
+
+fn email_local(email: &str) -> String {
+    email.split('@').next().unwrap_or("").to_owned()
 }
 
 pub async fn trace(link: &Link<'_>, tool: &str, args: &str, ok: bool, error: &str) {
@@ -552,8 +578,9 @@ mod tests {
                 "created_at": 1,
                 "closed_at": null,
                 "members": [
-                    {"account_id":"a","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":9000000000u64},
-                    {"account_id":"b","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"cara","machine_id":"m-c","node":"codex","agent":"codex","email":"cara@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"alice","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"bob","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":9000000000u64},
                     {"account_id":"old","machine_id":"m-old","node":"codex-old","agent":"codex","email":"old@example.com","joined_at":1,"last_seen":1}
                 ],
                 "rev": 2
@@ -613,17 +640,22 @@ mod tests {
             .iter_mut()
             .find(|task| task["id"] == task_id)
             .unwrap();
-        if let Some(owner) = task["owner"].as_str()
-            && owner != node
-            && !owner.starts_with(&format!("{node}@"))
+        if let Some(owner_node) = task["owner_node"].as_str()
+            && owner_node != node
         {
+            let person = if task["owner_account_id"] == "alice" {
+                "alice"
+            } else {
+                "bob"
+            };
             return Err((
                 axum::http::StatusCode::CONFLICT,
-                Json(json!({"error": format!("owned by {owner}"), "rev": task["rev"]})),
+                Json(
+                    json!({"error": format!("owned by {owner_node}@{person}"), "rev": task["rev"]}),
+                ),
             ));
         }
-        let person = if node == "codex" { "alice" } else { "bob" };
-        task["owner"] = json!(format!("{node}@{person}"));
+        task["owner"] = json!(node);
         task["owner_node"] = json!(node);
         task["owner_account_id"] = json!(if node == "codex" { "alice" } else { "bob" });
         task["status"] = json!("doing");
@@ -721,7 +753,7 @@ mod tests {
             .await
             .unwrap();
         let claimed = claim_task(&alice, "t1").await.unwrap();
-        assert_eq!(claimed.owner.as_deref(), Some("codex@alice"));
+        assert_eq!(claimed.owner.as_deref(), Some("codex"));
         let conflict = claim_task(&bob, "t1").await.unwrap_err();
         assert!(conflict.contains("owned by codex@alice"), "{conflict}");
         claim_task(&bob, "t2").await.unwrap();
@@ -736,22 +768,22 @@ mod tests {
         assert_eq!(detail.notes[0].kind, "handoff");
         assert_eq!(detail.notes[0].receipts[0].state, "surfaced");
         let lines = list_tasks(&bob, None, None).await.unwrap();
+        let board = status(&alice).await.unwrap();
+        assert_eq!(board.review.len(), 1);
+        assert!(board.mine.iter().any(|line| line.contains("t1")));
+        let stale = board
+            .members
+            .iter()
+            .find(|member| member.node == "codex-old")
+            .unwrap();
+        assert_eq!(stale.presence, "idle");
+        assert_eq!(board.members.len(), 4);
         assert!(
             lines
                 .tasks
                 .iter()
-                .any(|line| line.contains("t1 [review] codex@alice"))
+                .any(|line| line.contains("t1 [review] codex@alice") && !line.contains("cara"))
         );
-        let board = status(&alice).await.unwrap();
-        assert_eq!(board.review.len(), 1);
-        assert!(board.mine.iter().any(|line| line.contains("t1")));
-        assert!(
-            board
-                .members
-                .iter()
-                .all(|member| member.node != "codex-old")
-        );
-        assert_eq!(board.members.len(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

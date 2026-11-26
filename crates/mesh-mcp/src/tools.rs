@@ -350,13 +350,18 @@ impl MeshServer {
         &self,
         Parameters(args): Parameters<KillNodeArgs>,
     ) -> Result<Json<KillResult>, ErrorData> {
-        let data = client::call(&Request::Kill {
-            target: Some(args.node),
-            all: false,
-        })
-        .await
-        .map_err(hub_error)?;
-        Ok(Json(from_value(data)?))
+        let node = args.node.clone();
+        let result = async {
+            let data = client::call(&Request::Kill {
+                target: Some(args.node),
+                all: false,
+            })
+            .await
+            .map_err(hub_error)?;
+            Ok(Json(from_value(data)?))
+        }
+        .await;
+        self.reported("kill_node", &node, result).await
     }
 
     #[tool(
@@ -367,12 +372,16 @@ impl MeshServer {
                        send_message. `you` is your own id."
     )]
     async fn list_nodes(&self) -> Result<Json<NodeList>, ErrorData> {
-        let you = client::register(&self.identity).await.map_err(hub_error)?;
-        let data = client::call(&Request::List).await.map_err(hub_error)?;
-        Ok(Json(NodeList {
-            you,
-            nodes: from_value(data)?,
-        }))
+        let result = async {
+            let you = client::register(&self.identity).await.map_err(hub_error)?;
+            let data = client::call(&Request::List).await.map_err(hub_error)?;
+            Ok(Json(NodeList {
+                you,
+                nodes: from_value(data)?,
+            }))
+        }
+        .await;
+        self.reported("list_nodes", "", result).await
     }
 
     #[tool(
@@ -410,10 +419,8 @@ impl MeshServer {
             delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
             receipt: data["receipt"].as_str().unwrap_or("").to_owned(),
         };
-        if let Ok(login) = board_login(&self.identity) {
-            session::trace(&login.link(), "send_message", &sent.to, true, "").await;
-        }
-        Ok(Json(sent))
+        let to = sent.to.clone();
+        self.reported("send_message", &to, Ok(Json(sent))).await
     }
 
     #[tool(
@@ -423,13 +430,17 @@ impl MeshServer {
                        peer may have replied, or periodically while waiting on one."
     )]
     async fn check_inbox(&self) -> Result<Json<InboxResult>, ErrorData> {
-        let node = client::register(&self.identity).await.map_err(hub_error)?;
-        let data = client::call(&Request::Inbox { node, pid: None })
-            .await
-            .map_err(hub_error)?;
-        Ok(Json(InboxResult {
-            messages: from_value(data)?,
-        }))
+        let result = async {
+            let node = client::register(&self.identity).await.map_err(hub_error)?;
+            let data = client::call(&Request::Inbox { node, pid: None })
+                .await
+                .map_err(hub_error)?;
+            Ok(Json(InboxResult {
+                messages: from_value(data)?,
+            }))
+        }
+        .await;
+        self.reported("check_inbox", "", result).await
     }
 
     #[tool(
@@ -450,15 +461,21 @@ impl MeshServer {
             .receipts(&args.ids)
             .await
             .map_err(|err| ErrorData::internal_error(err.to_string(), None))?;
-        Ok(Json(ReceiptResult {
-            receipts: receipts
-                .into_iter()
-                .map(|receipt| ReceiptView {
-                    id: receipt.id,
-                    state: receipt.state,
-                })
-                .collect(),
-        }))
+        let shown = receipts.len();
+        self.reported(
+            "relay_receipt",
+            &shown.to_string(),
+            Ok(Json(ReceiptResult {
+                receipts: receipts
+                    .into_iter()
+                    .map(|receipt| ReceiptView {
+                        id: receipt.id,
+                        state: receipt.state,
+                    })
+                    .collect(),
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -643,7 +660,13 @@ impl MeshServer {
             "tmux attach -t {}",
             node.tmux_session.as_deref().unwrap_or_default()
         );
-        Ok(Json(SpawnResult { node, watch_with }))
+        let label = node.name.clone().unwrap_or_else(|| node.agent.clone());
+        self.reported(
+            "spawn_node",
+            &label,
+            Ok(Json(SpawnResult { node, watch_with })),
+        )
+        .await
     }
 
     #[tool(
@@ -673,10 +696,16 @@ impl MeshServer {
         let screen = tmux::capture(&pane, args.lines.unwrap_or(60))
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(Json(PeekResult {
-            node: args.node,
-            screen,
-        }))
+        let node = args.node.clone();
+        self.reported(
+            "peek_node",
+            &node,
+            Ok(Json(PeekResult {
+                node: args.node,
+                screen,
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -685,8 +714,8 @@ impl MeshServer {
                        gemini, grok). Call this first to see which agents are installed and \
                        whether their sessions can be resumed. Returns one entry per agent."
     )]
-    fn list_agents(&self) -> Json<AgentList> {
-        Json(AgentList {
+    async fn list_agents(&self) -> Result<Json<AgentList>, ErrorData> {
+        let listed = Json(AgentList {
             agents: self
                 .agents
                 .iter()
@@ -697,7 +726,8 @@ impl MeshServer {
                     reports_cost: caps.reports_cost,
                 })
                 .collect(),
-        })
+        });
+        self.reported("list_agents", "", Ok(listed)).await
     }
 
     #[tool(
@@ -711,6 +741,7 @@ impl MeshServer {
         Parameters(args): Parameters<OpenSessionArgs>,
     ) -> Result<Json<SessionOpened>, ErrorData> {
         let from = client::register(&self.identity).await.map_err(hub_error)?;
+        let agent = args.agent.clone();
         let data = client::call(&Request::OpenSession {
             agent: args.agent,
             cwd: absolute(&args.cwd),
@@ -718,7 +749,8 @@ impl MeshServer {
         })
         .await
         .map_err(hub_error)?;
-        Ok(Json(from_value(data)?))
+        self.reported("open_session", &agent, Ok(Json(from_value(data)?)))
+            .await
     }
 
     #[tool(
@@ -742,11 +774,17 @@ impl MeshServer {
         .await
         .map_err(hub_error)?;
         let transcript: Transcript = from_value(data["transcript"].clone())?;
-        Ok(Json(SessionAttached {
-            session: data["session"].as_str().unwrap_or_default().to_owned(),
-            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
-            turns: to_turns(&transcript, None),
-        }))
+        let agent = data["agent"].as_str().unwrap_or_default().to_owned();
+        self.reported(
+            "attach_session",
+            &agent,
+            Ok(Json(SessionAttached {
+                session: data["session"].as_str().unwrap_or_default().to_owned(),
+                agent: agent.clone(),
+                turns: to_turns(&transcript, None),
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -769,14 +807,20 @@ impl MeshServer {
         .await
         .map_err(hub_error)?;
         let reply: Reply = from_value(data["reply"].clone())?;
-        Ok(Json(AskResult {
-            reply: reply.text,
-            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
-            input_tokens: reply.usage.input_tokens,
-            output_tokens: reply.usage.output_tokens,
-            cost_usd: reply.cost.map(|c| c.as_usd()),
-            via: from_value(data["via"].clone())?,
-        }))
+        let agent = data["agent"].as_str().unwrap_or_default().to_owned();
+        self.reported(
+            "ask_agent",
+            &agent,
+            Ok(Json(AskResult {
+                reply: reply.text,
+                agent: agent.clone(),
+                input_tokens: reply.usage.input_tokens,
+                output_tokens: reply.usage.output_tokens,
+                cost_usd: reply.cost.map(|c| c.as_usd()),
+                via: from_value(data["via"].clone())?,
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -794,10 +838,16 @@ impl MeshServer {
         .await
         .map_err(hub_error)?;
         let transcript: Transcript = from_value(data["transcript"].clone())?;
-        Ok(Json(TranscriptResult {
-            agent: data["agent"].as_str().unwrap_or_default().to_owned(),
-            turns: to_turns(&transcript, args.last),
-        }))
+        let agent = data["agent"].as_str().unwrap_or_default().to_owned();
+        self.reported(
+            "read_session",
+            &agent,
+            Ok(Json(TranscriptResult {
+                agent: agent.clone(),
+                turns: to_turns(&transcript, args.last),
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -808,9 +858,14 @@ impl MeshServer {
     )]
     async fn get_usage(&self) -> Result<Json<UsageReport>, ErrorData> {
         let data = client::call(&Request::Usage).await.map_err(hub_error)?;
-        Ok(Json(UsageReport {
-            usage: from_value(data)?,
-        }))
+        self.reported(
+            "get_usage",
+            "",
+            Ok(Json(UsageReport {
+                usage: from_value(data)?,
+            })),
+        )
+        .await
     }
 
     #[tool(
@@ -862,7 +917,13 @@ impl MeshServer {
             );
         }
 
-        Ok(Json(SessionList { sessions: listed }))
+        let label = args.agent.clone().unwrap_or_default();
+        self.reported(
+            "list_sessions",
+            &label,
+            Ok(Json(SessionList { sessions: listed })),
+        )
+        .await
     }
 }
 
@@ -909,6 +970,27 @@ impl BoardLogin {
             agent: &self.agent,
             home: &self.home,
         }
+    }
+}
+
+impl MeshServer {
+    async fn reported<T>(
+        &self,
+        tool: &str,
+        args: &str,
+        result: Result<T, ErrorData>,
+    ) -> Result<T, ErrorData> {
+        let (ok, error) = match &result {
+            Ok(_) => (true, String::new()),
+            Err(err) => {
+                let text = format!("{err:?}");
+                (false, text.chars().take(180).collect())
+            }
+        };
+        if let Ok(login) = board_login(&self.identity) {
+            session::trace(&login.link(), tool, args, ok, &error).await;
+        }
+        result
     }
 }
 
