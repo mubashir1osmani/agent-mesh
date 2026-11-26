@@ -74,6 +74,8 @@ pub struct PeerNode {
     pub agent: String,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub last_seen: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

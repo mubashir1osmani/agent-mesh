@@ -120,7 +120,8 @@ the hub count them, cap them, and close them.
 | Tool | What it does |
 |---|---|
 | `list_nodes` | Live agent sessions on this machine, and which one is you |
-| `send_message` | Message a node (by id or name) and return immediately; the reply comes back as a message |
+| `peer_list` | Teammates on the relay, as `node@email`, including idle session members |
+| `send_message` | Message a node (by id, name, or `node@email` from `peer_list`) and return immediately |
 | `check_inbox` | Collect messages that were queued for you |
 | `spawn_node` | Start an agent in its own tmux session, optionally with a first prompt and a `name` |
 | `peek_node` | Read what is on a tmux node's screen without disturbing it |

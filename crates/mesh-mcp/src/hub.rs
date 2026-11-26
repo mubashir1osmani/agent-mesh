@@ -1198,15 +1198,20 @@ impl Hub {
 /// ground truth: a registration for a pid the hub already has keeps the existing id, and the
 /// tmux details recorded at spawn time.
 ///
-/// A name only ever comes from `spawn`: registration keeps the one already recorded and ignores
-/// any it is sent, so a session the user started is never renamed.
+/// A name already stored (from spawn, or from an earlier registration) is kept. A registration
+/// may set a name only when the node does not have one, which is how `AGENT_MESH_NAME` sticks.
 fn register(state: &mut State, mut node: Node) -> String {
     let existing = state
         .nodes
         .values()
         .find(|n| n.id == node.id || (node.pid.is_some() && n.pid == node.pid))
         .cloned();
-    node.name = existing.as_ref().and_then(|k| k.name.clone());
+    let incoming = node.name.clone().filter(|name| !name.trim().is_empty());
+    let kept = existing
+        .as_ref()
+        .and_then(|known| known.name.clone())
+        .filter(|name| !name.trim().is_empty());
+    node.name = kept.or(incoming);
     if let Some(known) = existing {
         node.id = known.id;
         node.tmux_session = node.tmux_session.or(known.tmux_session);
@@ -1428,12 +1433,17 @@ mod tests {
 
     struct RecordingRelay {
         sent: Mutex<Vec<String>>,
+        from_nodes: Mutex<Vec<String>>,
     }
 
     #[async_trait]
     impl RemoteMesh for RecordingRelay {
         async fn send(&self, message: &Outbound) -> Result<mesh_pro::SendAck, RemoteError> {
             self.sent.lock().unwrap().push(message.to_node.clone());
+            self.from_nodes
+                .lock()
+                .unwrap()
+                .push(message.from_node.clone());
             Ok(mesh_pro::SendAck {
                 to_machine: message
                     .to_machine
@@ -1651,6 +1661,7 @@ mod tests {
         register(&hub, "a").await;
         let record = Arc::new(RecordingRelay {
             sent: Mutex::new(Vec::new()),
+            from_nodes: Mutex::new(Vec::new()),
         });
         relay_bridge::install_for_test(
             &hub,
@@ -1661,6 +1672,7 @@ mod tests {
                 name: Some("remote-reviewer".to_owned()),
                 agent: "claude".to_owned(),
                 email: None,
+                last_seen: 0,
             }],
         );
 
@@ -1674,6 +1686,12 @@ mod tests {
         let by_name = hub.dispatch(send("a", "remote-reviewer", 0)).await.unwrap();
         assert_eq!(by_name["to"], "remote:m2:claude-9");
         assert_eq!(record.sent.lock().unwrap().len(), 2);
+        name(&hub, "a", "cx-box");
+        hub.dispatch(send("a", "remote-reviewer", 0)).await.unwrap();
+        assert_eq!(
+            record.from_nodes.lock().unwrap().last().map(String::as_str),
+            Some("cx-box")
+        );
 
         let listed: Vec<Node> =
             serde_json::from_value(hub.dispatch(Request::List).await.unwrap()).unwrap();
@@ -1802,11 +1820,7 @@ mod tests {
             serde_json::from_value(hub.dispatch(Request::List).await.unwrap()).unwrap();
         let by_id = |id: &str| listed.iter().find(|n| n.id == id).unwrap().name.clone();
         assert_eq!(by_id("a").as_deref(), Some("reviewer"));
-        assert_eq!(
-            by_id("user-session"),
-            None,
-            "registration never names a node"
-        );
+        assert_eq!(by_id("user-session").as_deref(), Some("impostor"));
     }
 
     #[tokio::test]
