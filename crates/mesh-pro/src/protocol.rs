@@ -94,6 +94,8 @@ pub struct SendBody {
 pub struct SendAck {
     pub to_machine: String,
     pub to_node: String,
+    #[serde(default)]
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,6 +169,10 @@ pub struct TeamState {
     pub id: String,
     pub name: String,
     pub members: Vec<TeamMember>,
+    #[serde(default)]
+    pub owner_account_id: String,
+    #[serde(default)]
+    pub pending: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,10 +221,22 @@ pub struct BoardSession {
 pub struct BoardNote {
     pub at: u64,
     pub by: String,
+    #[serde(default)]
+    pub by_account_id: String,
+    #[serde(default)]
+    pub by_node: String,
     pub kind: String,
     pub text: String,
     #[serde(default)]
     pub receipts: Vec<String>,
+    #[serde(default)]
+    pub delivery: Vec<BoardDelivery>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoardDelivery {
+    pub to: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,7 +247,15 @@ pub struct BoardTask {
     pub status: String,
     #[serde(default)]
     pub owner: Option<String>,
+    #[serde(default)]
+    pub owner_account_id: Option<String>,
+    #[serde(default)]
+    pub owner_node: Option<String>,
     pub created_by: String,
+    #[serde(default)]
+    pub created_by_account_id: String,
+    #[serde(default)]
+    pub created_by_node: String,
     pub updated_at: u64,
     pub rev: u64,
     #[serde(default)]

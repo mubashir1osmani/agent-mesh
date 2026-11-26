@@ -259,6 +259,7 @@ async fn send(
     Ok(Json(SendAck {
         to_machine,
         to_node,
+        id: "msg-1".into(),
     }))
 }
 

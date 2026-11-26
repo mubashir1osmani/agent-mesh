@@ -93,6 +93,7 @@ pub fn session_file(home: &Path) -> PathBuf {
 pub struct Link<'a> {
     pub api_base: &'a str,
     pub token: &'a str,
+    pub account_id: &'a str,
     pub machine_id: &'a str,
     pub node: &'a str,
     pub agent: &'a str,
@@ -105,8 +106,8 @@ pub async fn start(link: &Link<'_>, name: &str) -> Result<Started, String> {
         .session_create(name, link.node, link.agent)
         .await
         .map_err(|err| err.to_string())?;
-    save(link.home, link.node, &view)?;
-    Ok(started(view))
+    let saved = save(link.home, link.node, &view).map(|()| started(view));
+    finish(link, "session_start", name, saved).await
 }
 
 pub async fn join(link: &Link<'_>, code: &str) -> Result<BoardStatus, String> {
@@ -115,18 +116,25 @@ pub async fn join(link: &Link<'_>, code: &str) -> Result<BoardStatus, String> {
         .session_join(code, link.node, link.agent)
         .await
         .map_err(|err| err.to_string())?;
-    save(link.home, link.node, &view)?;
-    Ok(status_of(&view, link.node))
+    let saved =
+        save(link.home, link.node, &view).map(|()| status_of(&view, link.account_id, link.node));
+    finish(link, "session_join", code, saved).await
 }
 
 pub async fn status(link: &Link<'_>) -> Result<BoardStatus, String> {
     let client = client(link)?;
     let current = load(link.home, link.node)?;
     let view = client
-        .session_get(&current.id, 0)
+        .session_get(&current.id, 0, link.node)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(status_of(&view, link.node))
+    finish(
+        link,
+        "session_status",
+        "",
+        Ok(status_of(&view, link.account_id, link.node)),
+    )
+    .await
 }
 
 pub async fn list_tasks(
@@ -137,24 +145,33 @@ pub async fn list_tasks(
     let client = client(link)?;
     let current = load(link.home, link.node)?;
     let view = client
-        .session_get(&current.id, 0)
+        .session_get(&current.id, 0, link.node)
         .await
         .map_err(|err| err.to_string())?;
     let tasks = view
         .tasks
         .iter()
         .filter(|task| status_filter.is_none_or(|status| task.status == status))
-        .filter(|task| owner_filter.is_none_or(|owner| task.owner.as_deref() == Some(owner)))
+        .filter(|task| {
+            owner_filter.is_none_or(|owner| {
+                task.owner.as_deref().is_some_and(|value| {
+                    value == owner
+                        || value.starts_with(&format!("{owner}@"))
+                        || task.owner_node.as_deref() == Some(owner)
+                        || task.owner_account_id.as_deref() == Some(owner)
+                })
+            })
+        })
         .map(|task| line(&view, task))
         .collect();
-    Ok(TaskLines { tasks })
+    finish(link, "task_list", "", Ok(TaskLines { tasks })).await
 }
 
 pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, String> {
     let client = client(link)?;
     let current = load(link.home, link.node)?;
     let view = client
-        .session_get(&current.id, 0)
+        .session_get(&current.id, 0, link.node)
         .await
         .map_err(|err| err.to_string())?;
     let task = view
@@ -193,14 +210,20 @@ pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, Stri
                 .collect(),
         })
         .collect();
-    Ok(TaskDetail {
-        id: task.id.clone(),
-        title: task.title.clone(),
-        status: task.status.clone(),
-        owner: task.owner.clone(),
-        rev: task.rev,
-        notes,
-    })
+    finish(
+        link,
+        "task_get",
+        task_id,
+        Ok(TaskDetail {
+            id: task.id.clone(),
+            title: task.title.clone(),
+            status: task.status.clone(),
+            owner: task.owner.clone(),
+            rev: task.rev,
+            notes,
+        }),
+    )
+    .await
 }
 
 pub async fn add_task(
@@ -215,14 +238,14 @@ pub async fn add_task(
         .task_add(&current.id, link.node, title, owner, note)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(task_out(task))
+    finish(link, "task_add", title, Ok(task_out(task))).await
 }
 
 pub async fn claim_task(link: &Link<'_>, task_id: &str) -> Result<TaskOut, String> {
     let client = client(link)?;
     let current = load(link.home, link.node)?;
     let view = client
-        .session_get(&current.id, 0)
+        .session_get(&current.id, 0, link.node)
         .await
         .map_err(|err| err.to_string())?;
     let rev = view
@@ -235,7 +258,7 @@ pub async fn claim_task(link: &Link<'_>, task_id: &str) -> Result<TaskOut, Strin
         .task_claim(&current.id, task_id, link.node, rev)
         .await
         .map_err(|err| err.to_string())?;
-    Ok(task_out(task))
+    finish(link, "task_claim", task_id, Ok(task_out(task))).await
 }
 
 pub async fn update_task(
@@ -248,7 +271,7 @@ pub async fn update_task(
     let client = client(link)?;
     let current = load(link.home, link.node)?;
     let view = client
-        .session_get(&current.id, 0)
+        .session_get(&current.id, 0, link.node)
         .await
         .map_err(|err| err.to_string())?;
     let rev = view
@@ -271,7 +294,7 @@ pub async fn update_task(
         )
         .await
         .map_err(|err| err.to_string())?;
-    Ok(task_out(task))
+    finish(link, "task_update", task_id, Ok(task_out(task))).await
 }
 
 pub async fn note_task(
@@ -287,7 +310,19 @@ pub async fn note_task(
         .task_note(&current.id, task_id, link.node, kind, text)
         .await
         .map_err(|err| err.to_string())?;
-    get_task(link, task_id).await
+    finish(link, "task_note", task_id, get_task(link, task_id).await).await
+}
+
+async fn finish<T>(
+    link: &Link<'_>,
+    tool: &str,
+    args: &str,
+    result: Result<T, String>,
+) -> Result<T, String> {
+    let ok = result.is_ok();
+    let error = result.as_ref().err().cloned().unwrap_or_default();
+    trace(link, tool, args, ok, &error).await;
+    result
 }
 
 fn client(link: &Link<'_>) -> Result<RelayClient, String> {
@@ -312,7 +347,7 @@ fn task_out(task: BoardTask) -> TaskOut {
     }
 }
 
-fn status_of(view: &BoardView, node: &str) -> BoardStatus {
+fn status_of(view: &BoardView, account_id: &str, node: &str) -> BoardStatus {
     let mut todo = Vec::new();
     let mut doing = Vec::new();
     let mut blocked = Vec::new();
@@ -321,7 +356,15 @@ fn status_of(view: &BoardView, node: &str) -> BoardStatus {
     let mut mine = Vec::new();
     for task in &view.tasks {
         let text = line(view, task);
-        if task.owner.as_deref() == Some(node) {
+        if task.owner.as_ref().is_some_and(|owner| {
+            owns(
+                owner,
+                task.owner_account_id.as_deref(),
+                task.owner_node.as_deref(),
+                account_id,
+                node,
+            )
+        }) {
             mine.push(text.clone());
         }
         match task.status.as_str() {
@@ -363,22 +406,91 @@ fn member_status(member: &BoardMember) -> MemberStatus {
     }
 }
 
+fn owns(
+    owner: &str,
+    owner_account: Option<&str>,
+    owner_node: Option<&str>,
+    account_id: &str,
+    node: &str,
+) -> bool {
+    if let (Some(owner_account), Some(owner_node)) = (owner_account, owner_node)
+        && !owner_account.is_empty()
+        && !account_id.is_empty()
+    {
+        return owner_account == account_id && owner_node == node;
+    }
+    owner == node || owner.starts_with(&format!("{node}@"))
+}
+
 fn line(view: &BoardView, task: &BoardTask) -> String {
     let who = task
         .owner
         .as_deref()
-        .map(|owner| {
-            let person = view
-                .session
-                .members
-                .iter()
-                .find(|member| member.node == owner)
-                .map(|member| member.email.split('@').next().unwrap_or(owner))
-                .unwrap_or(owner);
-            format!("{owner}@{person}")
-        })
+        .map(|owner| label_owner(view, task, owner))
         .unwrap_or_else(|| "-".to_owned());
     format!("{} [{}] {who} {}", task.id, task.status, task.title)
+}
+
+fn label_owner(view: &BoardView, task: &BoardTask, owner: &str) -> String {
+    let account = task.owner_account_id.as_deref().unwrap_or("");
+    let node = task
+        .owner_node
+        .as_deref()
+        .filter(|node| !node.is_empty())
+        .unwrap_or(owner);
+    if !account.is_empty()
+        && let Some(member) = view.session.members.iter().find(|member| {
+            member.account_id == account && (member.node == node || member.node == owner)
+        })
+    {
+        let person = email_local(&member.email);
+        if !person.is_empty() {
+            let shown = if node.contains('@') { owner } else { node };
+            return format!("{shown}@{person}");
+        }
+    }
+    if owner.contains('@') {
+        return owner.to_owned();
+    }
+    let person = view
+        .session
+        .members
+        .iter()
+        .find(|member| member.node == owner)
+        .map(|member| email_local(&member.email))
+        .filter(|person| !person.is_empty())
+        .unwrap_or_else(|| owner.to_owned());
+    format!("{owner}@{person}")
+}
+
+fn email_local(email: &str) -> String {
+    email.split('@').next().unwrap_or("").to_owned()
+}
+
+pub async fn trace(link: &Link<'_>, tool: &str, args: &str, ok: bool, error: &str) {
+    let Ok(current) = load(link.home, link.node) else {
+        return;
+    };
+    let Ok(client) = client(link) else {
+        return;
+    };
+    let summary = format!("{tool} {args}");
+    let summary: String = summary.chars().take(180).collect();
+    let args: String = args.chars().take(180).collect();
+    let _ = client
+        .post_event(
+            &current.id,
+            &serde_json::json!({
+                "node": link.node,
+                "kind": "tool",
+                "ok": ok,
+                "summary": summary,
+                "tool": tool,
+                "args": args,
+                "error": error,
+            }),
+        )
+        .await;
 }
 
 fn save(home: &Path, node: &str, view: &BoardView) -> Result<(), String> {
@@ -466,8 +578,10 @@ mod tests {
                 "created_at": 1,
                 "closed_at": null,
                 "members": [
-                    {"account_id":"a","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":1},
-                    {"account_id":"b","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":1}
+                    {"account_id":"cara","machine_id":"m-c","node":"codex","agent":"codex","email":"cara@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"alice","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"bob","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"old","machine_id":"m-old","node":"codex-old","agent":"codex","email":"old@example.com","joined_at":1,"last_seen":1}
                 ],
                 "rev": 2
             },
@@ -526,16 +640,24 @@ mod tests {
             .iter_mut()
             .find(|task| task["id"] == task_id)
             .unwrap();
-        if let Some(owner) = task["owner"].as_str()
-            && owner != node
+        if let Some(owner_node) = task["owner_node"].as_str()
+            && owner_node != node
         {
-            let person = if owner == "codex" { "alice" } else { "bob" };
+            let person = if task["owner_account_id"] == "alice" {
+                "alice"
+            } else {
+                "bob"
+            };
             return Err((
                 axum::http::StatusCode::CONFLICT,
-                Json(json!({"error": format!("owned by {owner}@{person}"), "rev": task["rev"]})),
+                Json(
+                    json!({"error": format!("owned by {owner_node}@{person}"), "rev": task["rev"]}),
+                ),
             ));
         }
         task["owner"] = json!(node);
+        task["owner_node"] = json!(node);
+        task["owner_account_id"] = json!(if node == "codex" { "alice" } else { "bob" });
         task["status"] = json!("doing");
         task["rev"] = json!(task["rev"].as_u64().unwrap_or(1) + 1);
         Ok(Json(task.clone()))
@@ -606,6 +728,7 @@ mod tests {
         let alice = Link {
             api_base: &base,
             token: "alice",
+            account_id: "alice",
             machine_id: "m-a",
             node: "codex",
             agent: "codex",
@@ -614,6 +737,7 @@ mod tests {
         let bob = Link {
             api_base: &base,
             token: "bob",
+            account_id: "bob",
             machine_id: "m-b",
             node: "codex-b",
             agent: "codex",
@@ -644,15 +768,22 @@ mod tests {
         assert_eq!(detail.notes[0].kind, "handoff");
         assert_eq!(detail.notes[0].receipts[0].state, "surfaced");
         let lines = list_tasks(&bob, None, None).await.unwrap();
+        let board = status(&alice).await.unwrap();
+        assert_eq!(board.review.len(), 1);
+        assert!(board.mine.iter().any(|line| line.contains("t1")));
+        let stale = board
+            .members
+            .iter()
+            .find(|member| member.node == "codex-old")
+            .unwrap();
+        assert_eq!(stale.presence, "idle");
+        assert_eq!(board.members.len(), 4);
         assert!(
             lines
                 .tasks
                 .iter()
-                .any(|line| line.contains("t1 [review] codex@alice"))
+                .any(|line| line.contains("t1 [review] codex@alice") && !line.contains("cara"))
         );
-        let board = status(&alice).await.unwrap();
-        assert_eq!(board.review.len(), 1);
-        assert_eq!(board.members.len(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

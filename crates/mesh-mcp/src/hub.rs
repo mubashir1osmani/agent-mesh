@@ -1440,6 +1440,7 @@ mod tests {
                     .clone()
                     .unwrap_or_else(|| "m2".to_owned()),
                 to_node: message.to_node.clone(),
+                id: "msg-1".to_owned(),
             })
         }
 

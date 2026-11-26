@@ -246,8 +246,17 @@ impl RelayClient {
         .await
     }
 
-    pub async fn session_get(&self, id: &str, since: u64) -> Result<BoardView, AccountError> {
-        let url = format!("{}/v1/sessions/{id}?since={since}&wait_ms=0", self.api_base);
+    pub async fn session_get(
+        &self,
+        id: &str,
+        since: u64,
+        node: &str,
+    ) -> Result<BoardView, AccountError> {
+        let url = format!(
+            "{}/v1/sessions/{id}?since={since}&wait_ms=0&node={}",
+            self.api_base,
+            urlencoding_component(node)
+        );
         let raw = self
             .http
             .get_json(&url, &self.token, Duration::from_secs(30))
@@ -336,6 +345,18 @@ impl RelayClient {
             .post_json(&url, &self.token, body, Duration::from_secs(15))
             .await?;
         serde_json::from_str(&raw).map_err(AccountError::from)
+    }
+
+    pub async fn post_event(
+        &self,
+        session_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), AccountError> {
+        let url = format!("{}/v1/sessions/{session_id}/events", self.api_base);
+        self.http
+            .post_json(&url, &self.token, body, Duration::from_secs(10))
+            .await
+            .map(|_| ())
     }
 
     pub async fn peers(&self) -> Result<Vec<PeerNode>, AccountError> {
