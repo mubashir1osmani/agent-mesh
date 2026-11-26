@@ -403,10 +403,14 @@ impl MeshServer {
         })
         .await
         .map_err(hub_error)?;
-        Ok(Json(SendResult {
+        let sent = SendResult {
             to: data["to"].as_str().unwrap_or(&args.to).to_owned(),
             delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
-        }))
+        };
+        if let Ok(login) = board_login(&self.identity) {
+            session::trace(&login.link(), "send_message", &sent.to, true, "").await;
+        }
+        Ok(Json(sent))
     }
 
     #[tool(
@@ -884,6 +888,7 @@ fn absolute(cwd: &str) -> String {
 struct BoardLogin {
     api: String,
     token: String,
+    account_id: String,
     machine: String,
     node: String,
     agent: String,
@@ -895,6 +900,7 @@ impl BoardLogin {
         session::Link {
             api_base: &self.api,
             token: &self.token,
+            account_id: &self.account_id,
             machine_id: &self.machine,
             node: &self.node,
             agent: &self.agent,
@@ -912,7 +918,7 @@ fn board_login(identity: &Identity) -> Result<BoardLogin, ErrorData> {
         .map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "local".to_owned());
-    let (node, agent) = match identity.node.as_ref() {
+    let (fallback, agent) = match identity.node.as_ref() {
         Some(node) => {
             let name = node
                 .name
@@ -923,9 +929,15 @@ fn board_login(identity: &Identity) -> Result<BoardLogin, ErrorData> {
         }
         None => ("codex".to_owned(), "codex".to_owned()),
     };
+    let node = std::env::var("AGENT_MESH_NAME")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
     Ok(BoardLogin {
         api: creds.api_base,
         token: creds.token,
+        account_id: creds.account_id,
         machine,
         node,
         agent,

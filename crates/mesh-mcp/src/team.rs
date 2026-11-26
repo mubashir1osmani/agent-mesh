@@ -6,13 +6,17 @@ pub async fn run(mut args: impl Iterator<Item = String>) -> Result<(), Box<dyn s
         "create" => {
             let name = args.next().ok_or("agent-mesh team create needs a name")?;
             let team = client()?.create_team(&name).await?;
-            println!("{} {}", team.name, team.id);
+            println!("Created team {}", team.name);
             Ok(())
         }
         "invite" => {
             let email = args.next().ok_or("agent-mesh team invite needs an email")?;
             let team = client()?.invite(&email).await?;
-            println!("{}", team.members.len());
+            println!(
+                "Invited {email} to {} ({} members)",
+                team.name,
+                team.members.len()
+            );
             Ok(())
         }
         other => {

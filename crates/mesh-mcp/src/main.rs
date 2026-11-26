@@ -90,7 +90,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "agent-mesh starting"
     );
 
-    let identity = Arc::new(client::Identity::detect().await);
+    let mut detected = client::Identity::detect().await;
+    if let Some(node) = detected.node.as_mut()
+        && node.name.as_ref().is_none_or(|name| name.is_empty())
+        && let Some(name) = config.name.clone().filter(|name| !name.trim().is_empty())
+    {
+        node.name = Some(name);
+    }
+    let identity = Arc::new(detected);
     if let Some(node) = &identity.node {
         // Join the mesh now so this session shows up in list_nodes before it calls any tool. Every
         // tool goes through the hub, so a failure here is logged and retried on the next call.

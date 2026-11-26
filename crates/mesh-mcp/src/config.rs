@@ -33,6 +33,9 @@ pub struct Config {
     pub wake_budget_per_hour: u64,
 
     #[serde(default)]
+    pub name: Option<String>,
+
+    #[serde(default)]
     pub agents: BTreeMap<String, AgentConfig>,
 
     #[serde(default)]
@@ -165,6 +168,7 @@ impl Config {
             max_processes: default_max_processes(),
             idle_timeout_minutes: default_idle_timeout(),
             wake_budget_per_hour: default_wake_budget(),
+            name: None,
             telemetry: mesh_telemetry::TelemetryConfig::default(),
             agents: BTreeMap::from([
                 (
@@ -273,6 +277,7 @@ mod tests {
         )
         .expect("valid config");
 
+        assert_eq!(cfg.name.as_deref(), None);
         assert_eq!(cfg.max_ask_depth, 4);
         assert_eq!(cfg.turn_timeout_seconds, 300);
         assert_eq!(cfg.max_processes, 4);

@@ -31,11 +31,15 @@ impl Identity {
 
         // A node the hub spawned is already registered under this id, with its tmux session.
         let id = std::env::var(NODE_ENV).unwrap_or_else(|_| hub::mint_id(&agent));
+        let name = std::env::var("AGENT_MESH_NAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
 
         Self {
             node: Some(Node {
                 id,
-                name: None,
+                name,
                 agent,
                 cwd,
                 pid: Some(pid),
