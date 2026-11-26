@@ -1,5 +1,4 @@
-use serde::de::Error as _;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CACHE_TTL_SECONDS: u64 = 900;
 
@@ -95,6 +94,8 @@ pub struct SendBody {
 pub struct SendAck {
     pub to_machine: String,
     pub to_node: String,
+    #[serde(default)]
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,42 +217,14 @@ pub struct BoardSession {
     pub rev: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct BoardActor {
-    #[serde(default)]
-    pub account_id: String,
-    pub node: String,
-}
-
-impl<'de> Deserialize<'de> for BoardActor {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::String(node) => Ok(Self {
-                account_id: String::new(),
-                node,
-            }),
-            serde_json::Value::Object(map) => Ok(Self {
-                account_id: map
-                    .get("account_id")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-                node: map
-                    .get("node")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
-            }),
-            _ => Err(D::Error::custom("actor must be a string or an object")),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardNote {
     pub at: u64,
-    pub by: BoardActor,
+    pub by: String,
+    #[serde(default)]
+    pub by_account_id: String,
+    #[serde(default)]
+    pub by_node: String,
     pub kind: String,
     pub text: String,
     #[serde(default)]
@@ -273,8 +246,16 @@ pub struct BoardTask {
     pub title: String,
     pub status: String,
     #[serde(default)]
-    pub owner: Option<BoardActor>,
-    pub created_by: BoardActor,
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub owner_account_id: Option<String>,
+    #[serde(default)]
+    pub owner_node: Option<String>,
+    pub created_by: String,
+    #[serde(default)]
+    pub created_by_account_id: String,
+    #[serde(default)]
+    pub created_by_node: String,
     pub updated_at: u64,
     pub rev: u64,
     #[serde(default)]

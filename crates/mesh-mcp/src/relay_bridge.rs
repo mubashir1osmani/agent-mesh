@@ -225,6 +225,7 @@ pub(super) async fn try_remote(
             Ok(Some(serde_json::json!({
                 "delivery": "relay",
                 "to": mesh_pro::remote_target_id(&ack.to_machine, &ack.to_node),
+                "receipt": ack.id,
             })))
         }
         Err(RemoteError::Unknown(_)) if speculative => Ok(None),

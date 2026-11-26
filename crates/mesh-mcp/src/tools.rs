@@ -152,6 +152,8 @@ pub struct SendResult {
     /// `pushed`: typed straight into the recipient's tmux pane. `queued`: waiting in its inbox
     /// until it checks.
     pub delivery: String,
+    #[serde(default)]
+    pub receipt: String,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -406,6 +408,7 @@ impl MeshServer {
         let sent = SendResult {
             to: data["to"].as_str().unwrap_or(&args.to).to_owned(),
             delivery: data["delivery"].as_str().unwrap_or("queued").to_owned(),
+            receipt: data["receipt"].as_str().unwrap_or("").to_owned(),
         };
         if let Ok(login) = board_login(&self.identity) {
             session::trace(&login.link(), "send_message", &sent.to, true, "").await;

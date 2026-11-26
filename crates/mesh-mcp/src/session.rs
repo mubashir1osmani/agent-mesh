@@ -154,9 +154,12 @@ pub async fn list_tasks(
         .filter(|task| status_filter.is_none_or(|status| task.status == status))
         .filter(|task| {
             owner_filter.is_none_or(|owner| {
-                task.owner
-                    .as_ref()
-                    .is_some_and(|actor| actor.node == owner || actor.account_id == owner)
+                task.owner.as_deref().is_some_and(|value| {
+                    value == owner
+                        || value.starts_with(&format!("{owner}@"))
+                        || task.owner_node.as_deref() == Some(owner)
+                        || task.owner_account_id.as_deref() == Some(owner)
+                })
             })
         })
         .map(|task| line(&view, task))
@@ -190,7 +193,7 @@ pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, Stri
         .notes
         .iter()
         .map(|note| NoteDetail {
-            by: actor_label(&view, &note.by),
+            by: note.by.clone(),
             kind: note.kind.clone(),
             text: note.text.clone(),
             receipts: note
@@ -215,7 +218,7 @@ pub async fn get_task(link: &Link<'_>, task_id: &str) -> Result<TaskDetail, Stri
             id: task.id.clone(),
             title: task.title.clone(),
             status: task.status.clone(),
-            owner: task.owner.as_ref().map(|owner| actor_label(&view, owner)),
+            owner: task.owner.clone(),
             rev: task.rev,
             notes,
         }),
@@ -339,7 +342,7 @@ fn task_out(task: BoardTask) -> TaskOut {
         id: task.id,
         title: task.title,
         status: task.status,
-        owner: task.owner.map(|owner| owner.node),
+        owner: task.owner,
         rev: task.rev,
     }
 }
@@ -353,11 +356,15 @@ fn status_of(view: &BoardView, account_id: &str, node: &str) -> BoardStatus {
     let mut mine = Vec::new();
     for task in &view.tasks {
         let text = line(view, task);
-        if task
-            .owner
-            .as_ref()
-            .is_some_and(|owner| owns(owner, account_id, node))
-        {
+        if task.owner.as_ref().is_some_and(|owner| {
+            owns(
+                owner,
+                task.owner_account_id.as_deref(),
+                task.owner_node.as_deref(),
+                account_id,
+                node,
+            )
+        }) {
             mine.push(text.clone());
         }
         match task.status.as_str() {
@@ -370,7 +377,13 @@ fn status_of(view: &BoardView, account_id: &str, node: &str) -> BoardStatus {
     }
     BoardStatus {
         code: view.code.clone(),
-        members: view.session.members.iter().map(member_status).collect(),
+        members: view
+            .session
+            .members
+            .iter()
+            .filter(|member| member_visible(member))
+            .map(member_status)
+            .collect(),
         todo,
         doing,
         blocked,
@@ -399,51 +412,32 @@ fn member_status(member: &BoardMember) -> MemberStatus {
     }
 }
 
-fn owns(owner: &mesh_pro::BoardActor, account_id: &str, node: &str) -> bool {
-    if !owner.account_id.is_empty() && !account_id.is_empty() {
-        return owner.account_id == account_id && owner.node == node;
+fn owns(
+    owner: &str,
+    owner_account: Option<&str>,
+    owner_node: Option<&str>,
+    account_id: &str,
+    node: &str,
+) -> bool {
+    if let (Some(owner_account), Some(owner_node)) = (owner_account, owner_node)
+        && !owner_account.is_empty()
+        && !account_id.is_empty()
+    {
+        return owner_account == account_id && owner_node == node;
     }
-    owner.node == node
+    owner == node || owner.starts_with(&format!("{node}@"))
 }
 
-fn actor_label(view: &BoardView, actor: &mesh_pro::BoardActor) -> String {
-    let member = if !actor.account_id.is_empty() {
-        view.session
-            .members
-            .iter()
-            .find(|member| member.account_id == actor.account_id)
-    } else {
-        let hits: Vec<_> = view
-            .session
-            .members
-            .iter()
-            .filter(|member| member.node == actor.node)
-            .collect();
-        if hits.len() == 1 {
-            hits.first().copied()
-        } else {
-            None
-        }
-    };
-    let person = member
-        .map(|member| {
-            member
-                .email
-                .split('@')
-                .next()
-                .filter(|part| !part.is_empty())
-                .unwrap_or(&actor.node)
-        })
-        .unwrap_or(&actor.node);
-    format!("{}@{person}", actor.node)
+fn member_visible(member: &BoardMember) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    member.last_seen == 0 || now.saturating_sub(member.last_seen) <= 45
 }
 
-fn line(view: &BoardView, task: &BoardTask) -> String {
-    let who = task
-        .owner
-        .as_ref()
-        .map(|owner| actor_label(view, owner))
-        .unwrap_or_else(|| "-".to_owned());
+fn line(_view: &BoardView, task: &BoardTask) -> String {
+    let who = task.owner.clone().unwrap_or_else(|| "-".to_owned());
     format!("{} [{}] {who} {}", task.id, task.status, task.title)
 }
 
@@ -558,8 +552,9 @@ mod tests {
                 "created_at": 1,
                 "closed_at": null,
                 "members": [
-                    {"account_id":"a","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":1},
-                    {"account_id":"b","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":1}
+                    {"account_id":"a","machine_id":"m-a","node":"codex","agent":"codex","email":"alice@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"b","machine_id":"m-b","node":"codex-b","agent":"codex","email":"bob@example.com","joined_at":1,"last_seen":9000000000u64},
+                    {"account_id":"old","machine_id":"m-old","node":"codex-old","agent":"codex","email":"old@example.com","joined_at":1,"last_seen":1}
                 ],
                 "rev": 2
             },
@@ -620,14 +615,17 @@ mod tests {
             .unwrap();
         if let Some(owner) = task["owner"].as_str()
             && owner != node
+            && !owner.starts_with(&format!("{node}@"))
         {
-            let person = if owner == "codex" { "alice" } else { "bob" };
             return Err((
                 axum::http::StatusCode::CONFLICT,
-                Json(json!({"error": format!("owned by {owner}@{person}"), "rev": task["rev"]})),
+                Json(json!({"error": format!("owned by {owner}"), "rev": task["rev"]})),
             ));
         }
-        task["owner"] = json!(node);
+        let person = if node == "codex" { "alice" } else { "bob" };
+        task["owner"] = json!(format!("{node}@{person}"));
+        task["owner_node"] = json!(node);
+        task["owner_account_id"] = json!(if node == "codex" { "alice" } else { "bob" });
         task["status"] = json!("doing");
         task["rev"] = json!(task["rev"].as_u64().unwrap_or(1) + 1);
         Ok(Json(task.clone()))
@@ -723,7 +721,7 @@ mod tests {
             .await
             .unwrap();
         let claimed = claim_task(&alice, "t1").await.unwrap();
-        assert_eq!(claimed.owner.as_deref(), Some("codex"));
+        assert_eq!(claimed.owner.as_deref(), Some("codex@alice"));
         let conflict = claim_task(&bob, "t1").await.unwrap_err();
         assert!(conflict.contains("owned by codex@alice"), "{conflict}");
         claim_task(&bob, "t2").await.unwrap();
@@ -746,6 +744,13 @@ mod tests {
         );
         let board = status(&alice).await.unwrap();
         assert_eq!(board.review.len(), 1);
+        assert!(board.mine.iter().any(|line| line.contains("t1")));
+        assert!(
+            board
+                .members
+                .iter()
+                .all(|member| member.node != "codex-old")
+        );
         assert_eq!(board.members.len(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
